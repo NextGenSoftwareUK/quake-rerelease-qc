@@ -956,6 +956,12 @@ void() key_touch =
 	stuffcmd (other, "bf\n");
 	other.items = other.items | self.items;
 
+	// OQuake: report key pickup to STAR API for cross-game with ODOOM
+	if (self.items == IT_KEY1)
+		OQuake_OnKeyPickup("silver_key");
+	else if (self.items == IT_KEY2)
+		OQuake_OnKeyPickup("gold_key");
+
 	if (!coop)
 	{	
 		self.solid = SOLID_NOT;

@@ -237,8 +237,17 @@ void() door_touch =
 	// FIXME: blink key on player's status bar
 	if ( (self.items & other.items) != self.items )
 	{
+		// OQuake: try cross-game key (ODOOM keycards) via STAR API
 		if (self.owner.items == IT_KEY1)
 		{
+			if (OQuake_CheckDoorAccess(self.owner.targetname, "silver_key"))
+			{
+				self.touch = SUB_Null;
+				if (self.enemy)
+					self.enemy.touch = SUB_Null;
+				door_use ();
+				return;
+			}
 			if (world.worldtype == WORLDTYPE_BASE)
 			{
 				centerprint (other, "$qc_need_silver_keycard");
@@ -257,6 +266,14 @@ void() door_touch =
 		}
 		else
 		{
+			if (OQuake_CheckDoorAccess(self.owner.targetname, "gold_key"))
+			{
+				self.touch = SUB_Null;
+				if (self.enemy)
+					self.enemy.touch = SUB_Null;
+				door_use ();
+				return;
+			}
 			if (world.worldtype == WORLDTYPE_BASE)
 			{
 				centerprint (other, "$qc_need_gold_keycard");

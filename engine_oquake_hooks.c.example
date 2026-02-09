@@ -1,0 +1,63 @@
+/**
+ * OQuake engine integration example
+ *
+ * Add this (or equivalent) to your Quake engine so QuakeC builtins
+ * OQuake_OnKeyPickup and OQuake_CheckDoorAccess call into oquake_star_integration.
+ *
+ * 1. Call OQuake_STAR_Init() at game/host init and OQuake_STAR_Cleanup() at shutdown.
+ * 2. Register the two extension builtins so they invoke the C functions below.
+ *
+ * Engine-specific: you must map your "extension builtin" / "custom opcode" system
+ * to these two functions. QuakeC declares:
+ *   void(string keyname) OQuake_OnKeyPickup = #0:ex_OQuake_OnKeyPickup;
+ *   float(string doorname, string requiredkey) OQuake_CheckDoorAccess = #0:ex_OQuake_CheckDoorAccess;
+ */
+
+#include "oquake_star_integration.h"
+
+/* Call once at host/game init (e.g. Host_Init) */
+void OQuake_Engine_Init(void)
+{
+	OQuake_STAR_Init();
+}
+
+/* Call once at shutdown (e.g. Host_Shutdown) */
+void OQuake_Engine_Shutdown(void)
+{
+	OQuake_STAR_Cleanup();
+}
+
+/**
+ * Implement builtin: OQuake_OnKeyPickup(keyname)
+ * QuakeC calls this when player picks up silver_key or gold_key.
+ */
+void OQuake_OnKeyPickup_Builtin(const char *keyname)
+{
+	OQuake_STAR_OnKeyPickup(keyname);
+}
+
+/**
+ * Implement builtin: OQuake_CheckDoorAccess(doorname, requiredkey)
+ * Returns 1 if door can open (cross-game key), 0 otherwise.
+ */
+int OQuake_CheckDoorAccess_Builtin(const char *doorname, const char *requiredkey)
+{
+	return OQuake_STAR_CheckDoorAccess(doorname, requiredkey);
+}
+
+/*
+ * Example registration (pseudocode - adapt to your engine):
+ *
+ * In your extension builtin table (e.g. where you handle #0:ex_*):
+ *   if (strcmp(name, "ex_OQuake_OnKeyPickup") == 0) {
+ *     // Pop one string from stack, call OQuake_OnKeyPickup_Builtin(s);
+ *     return;
+ *   }
+ *   if (strcmp(name, "ex_OQuake_CheckDoorAccess") == 0) {
+ *     // Pop two strings, call OQuake_STAR_CheckDoorAccess, push float result
+ *     return;
+ *   }
+ *
+ * In Host_Init():   OQuake_Engine_Init();
+ * In Host_Shutdown(): OQuake_Engine_Shutdown();
+ */
