@@ -46,6 +46,7 @@ You must own Quake to use the game data; get it from [Steam](https://store.steam
 2. **CMake** (3.10 or later)
 3. **Quake engine source** that builds the executable which runs the QuakeC from `quake-rerelease-qc`
 4. **STAR API credentials** (same as ODOOM: SSO or API key)
+5. **Vulkan SDK** (for vkQuake) – https://vulkan.lunarg.com/sdk/home
 
 ## Step 1: Build the Native Wrapper
 
@@ -68,130 +69,49 @@ Same as ODOOM (see `Doom\WINDOWS_INTEGRATION.md` Step 2). Use `STAR_USERNAME`/`S
 
 ## Step 3: Copy OQuake Integration Files to Your Quake Tree
 
-If your **engine** source lives with the QuakeC (e.g. a single repo):
+Run **BUILD_OQUAKE.bat** – it copies integration and star_api into `QUAKE_SRC` (quake-rerelease-qc) and, if **VKQUAKE_SRC** is set, into vkQuake's Quake folder and builds vkQuake. Run from **Developer Command Prompt for VS 2022** so MSBuild is in PATH.
 
-```powershell
-cd C:\Source\OASIS-master
-
-# Copy OQuake integration and STAR API into Quake source
-$QUAKE_SRC = "C:\Source\quake-rerelease-qc"
-Copy-Item "OASIS Omniverse\OQuake\oquake_star_integration.c" $QUAKE_SRC
-Copy-Item "OASIS Omniverse\OQuake\oquake_star_integration.h" $QUAKE_SRC
-Copy-Item "OASIS Omniverse\OQuake\oquake_version.h" $QUAKE_SRC
-Copy-Item "OASIS Omniverse\NativeWrapper\star_api.h" $QUAKE_SRC
-Copy-Item "OASIS Omniverse\NativeWrapper\build\Release\star_api.dll" $QUAKE_SRC
-Copy-Item "OASIS Omniverse\NativeWrapper\build\Release\star_api.lib" $QUAKE_SRC
-```
-
-If the **engine** is in a different directory, copy the same files into the **engine** project instead of `quake-rerelease-qc`.
+Or copy manually: see **COPY_TO_QUAKE_AND_BUILD.ps1** and **vkquake_oquake\apply_oquake_to_vkquake.ps1**.
 
 ## Step 4: Engine Modifications (C Code)
 
 QuakeC cannot call C functions directly. The **engine** must:
 
 1. Call `OQuake_STAR_Init()` at startup and `OQuake_STAR_Cleanup()` at shutdown.
-2. When the player picks up a key (in the engine’s item-touch handler or via a known key entity), call:
-   - `OQuake_STAR_OnKeyPickup("silver_key")` for silver key (IT_KEY1)
-   - `OQuake_STAR_OnKeyPickup("gold_key")` for gold key (IT_KEY2)
-3. When the player touches a key door and **does not** have the required key locally, call:
-   - `OQuake_STAR_CheckDoorAccess(door_targetname, "silver_key")` or `"gold_key"`.
-   If it returns 1, open the door and consume the key (or use a one-time use as in STAR API).
+2. When the player picks up a key: `OQuake_STAR_OnKeyPickup("silver_key")` or `"gold_key"`.
+3. When the player touches a key door and **does not** have the required key locally: `OQuake_STAR_CheckDoorAccess(door_targetname, "silver_key")` or `"gold_key"`. If it returns 1, open the door.
 
-Include in the engine (e.g. `host.c` or main init):
+Include in the engine (e.g. `host.c`): `#include "oquake_star_integration.h"`. See **engine_oquake_hooks.c.example** and **vkquake_oquake\VKQUAKE_OQUAKE_INTEGRATION.md** for vkQuake.
 
-```c
-#include "oquake_star_integration.h"
-```
+## Step 5: QuakeC and engine builtins
 
-In your init (e.g. `Host_Init`):
-
-```c
-OQuake_STAR_Init();
-```
-
-In your shutdown:
-
-```c
-OQuake_STAR_Cleanup();
-```
-
-In the code path that handles **key pickup** (when the engine detects that the player touched `item_key1` / `item_key2` or equivalent):
-
-```c
-// After giving the player IT_KEY1 / IT_KEY2
-OQuake_STAR_OnKeyPickup("silver_key");   // for IT_KEY1
-OQuake_STAR_OnKeyPickup("gold_key");     // for IT_KEY2
-```
-
-In the code path that handles **key door touch** (when the player doesn’t have the required key):
-
-```c
-// required_key is "silver_key" or "gold_key" depending on door
-if (OQuake_STAR_CheckDoorAccess(door_targetname, required_key)) {
-    // Open door (same as when player had local key)
-    door_fire();
-    return;
-}
-```
-
-## Step 5: QuakeC and engine builtins (C:\Source\quake-rerelease-qc)
-
-The QuakeC in `quake-rerelease-qc` already calls two **extension builtins** that the engine must implement:
-
-- **OQuake_OnKeyPickup(keyname)** – called from `items.qc` when the player picks up silver or gold key.
-- **OQuake_CheckDoorAccess(doorname, requiredkey)** – called from `doors.qc` when the player touches a key door without the local key; returns 1 to open with cross-game key.
-
-In `defs.qc` they are declared as `#0:ex_OQuake_OnKeyPickup` and `#0:ex_OQuake_CheckDoorAccess`. Your engine must register these extension builtins and call `OQuake_STAR_OnKeyPickup` and `OQuake_STAR_CheckDoorAccess` from `oquake_star_integration.c`. See the example file in the Quake tree:
-
-**`C:\Source\quake-rerelease-qc\engine_oquake_hooks.c.example`**
-
-That file shows the C wrappers and how to wire them into your engine’s extension builtin system.
-
-The game logic in `quakec\doors.qc` and `quakec\items.qc` already contains the calls; the engine must hook into:
-
-- **Key pickup:** Where the engine gives the player `IT_KEY1` or `IT_KEY2` (e.g. after `key_touch` in QuakeC triggers or when the engine handles the same).
-- **Door touch:** Where the engine or QuakeC reports “player touched door and doesn’t have key.” The engine can then call `OQuake_STAR_CheckDoorAccess` and, if it returns 1, trigger the door open.
-
-So no change to QuakeC is strictly required if the engine adds the hooks above. If you prefer to keep a marker in QuakeC (e.g. comments) for where the engine should call the STAR layer, see `C:\Source\quake-rerelease-qc\OQUAKE_INTEGRATION.md`.
+The QuakeC in quake-rerelease-qc declares `OQuake_OnKeyPickup` and `OQuake_CheckDoorAccess` as extension builtins (`#0:ex_OQuake_*`). The engine must register these in pr_ext.c and implement them via **pr_ext_oquake.c** (calling `OQuake_STAR_OnKeyPickup` and `OQuake_STAR_CheckDoorAccess`). See **VKQUAKE_OQUAKE_INTEGRATION.md** in vkquake_oquake.
 
 ## Step 6: Build System
 
-- Add `oquake_star_integration.c` to the engine project.
-- Include path to the directory containing `oquake_star_integration.h` and `star_api.h`.
-- Link `star_api.lib` and `winhttp.lib` (Windows).
-- Ensure `star_api.dll` is next to the built executable (or on PATH).
-
-## Step 7: Branding (Optional)
-
-Use `oquake_version.h`: `OQUAKE_TITLE` for window title so the game shows as **OQuake 1.0 (Build 1)**.
+Add `oquake_star_integration.c` and `pr_ext_oquake.c` to the engine project. Link `star_api.lib` and `winhttp.lib` (Windows). Ensure `star_api.dll` is next to the built exe.
 
 ## Cross-Game Key Mapping
 
-| OQuake door  | Keys that open it (local + cross-game)        |
-|-------------|------------------------------------------------|
+| OQuake door | Keys that open it (local + cross-game) |
+|-------------|----------------------------------------|
 | Silver key  | OQuake silver_key, ODOOM red_keycard, skull_key |
 | Gold key    | OQuake gold_key, ODOOM blue_keycard, yellow_keycard |
 
-| ODOOM door  | Keys that open it (local + cross-game)        |
-|-------------|------------------------------------------------|
-| Red         | ODOOM red_keycard, OQuake silver_key           |
-| Blue / Yellow | ODOOM blue/yellow keycard, OQuake gold_key   |
+| ODOOM door  | Keys that open it (local + cross-game) |
+|-------------|----------------------------------------|
+| Red         | ODOOM red_keycard, OQuake silver_key |
+| Blue / Yellow | ODOOM blue/yellow keycard, OQuake gold_key |
 
 ## Testing
 
-1. Run OQuake with STAR env vars set. Console should show:  
-   `OQuake STAR API: Authenticated via SSO. Cross-game features enabled.`
+1. Run OQuake with STAR env vars set. Console should show: `OQuake STAR API: Authenticated. Cross-game keys enabled.`
 2. Pick up silver key in OQuake → console: `OQuake STAR API: Added silver_key to cross-game inventory.`
-3. Run ODOOM, find a red keycard door. Open it with the key you got in OQuake (if mapping is applied in Doom).
-4. In ODOOM pick up red keycard, then in OQuake open a silver door without the local key → door should open via cross-game key.
+3. In ODOOM pick up red keycard, then in OQuake open a silver door without the local key → door should open via cross-game key.
 
 ## Troubleshooting
 
-- **star_api.lib/dll not found:** Build NativeWrapper and copy the DLL next to the exe.
+- **star_api.lib/dll not found:** Build NativeWrapper; BUILD_OQUAKE.bat copies from Doom folder.
+- **MSBuild not in PATH:** Open **Developer Command Prompt for VS 2022** and run BUILD_OQUAKE.bat from there.
 - **No cross-game keys:** Ensure STAR_USERNAME/STAR_PASSWORD or STAR_API_KEY/STAR_AVATAR_ID are set and init succeeds.
-- **Doors don’t open with other game’s key:** Ensure the engine calls `OQuake_STAR_CheckDoorAccess` when the player lacks the local key and passes the correct `required_key` (`"silver_key"` or `"gold_key"`).
-
-## Support
-
-- [ODOOM Windows Integration](../Doom/WINDOWS_INTEGRATION.md)
-- [Main Integration Guide](../INTEGRATION_GUIDE.md)
+- **gfx.wad / id1:** Use `-basedir` to point to your Steam Quake install or copy id1 and gfx.wad next to the exe.
