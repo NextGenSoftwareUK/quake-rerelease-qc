@@ -270,8 +270,20 @@ static void OQ_GetGroupedDisplayInfo(const oquake_inventory_entry_t* item, char*
         *value = OQ_ParsePickupDelta(desc);
         return;
     }
-    if (!strncmp(name, "quake_pickup_armor_", 19)) {
-        q_strlcpy(label, "Armor", label_size);
+    if (!strncmp(name, "quake_pickup_armor_green", 24)) {
+        q_strlcpy(label, "Green Armor", label_size);
+        *mode = OQ_GROUP_MODE_SUM;
+        *value = OQ_ParsePickupDelta(desc);
+        return;
+    }
+    if (!strncmp(name, "quake_pickup_armor_yellow", 25)) {
+        q_strlcpy(label, "Yellow Armor", label_size);
+        *mode = OQ_GROUP_MODE_SUM;
+        *value = OQ_ParsePickupDelta(desc);
+        return;
+    }
+    if (!strncmp(name, "quake_pickup_armor_red", 22)) {
+        q_strlcpy(label, "Red Armor", label_size);
         *mode = OQ_GROUP_MODE_SUM;
         *value = OQ_ParsePickupDelta(desc);
         return;
@@ -338,12 +350,9 @@ static void OQ_GetGroupedDisplayInfo(const oquake_inventory_entry_t* item, char*
         return;
     }
     /* Unlock-style names (when stack_* is 0) */
-    if (!strcmp(name, "quake_armor_green") || !strcmp(name, "quake_armor_yellow") || !strcmp(name, "quake_armor_red")) {
-        q_strlcpy(label, "Armor", label_size);
-        *mode = OQ_GROUP_MODE_SUM;
-        *value = 1;
-        return;
-    }
+    if (!strcmp(name, "quake_armor_green")) { q_strlcpy(label, "Green Armor", label_size); *mode = OQ_GROUP_MODE_SUM; *value = 1; return; }
+    if (!strcmp(name, "quake_armor_yellow")) { q_strlcpy(label, "Yellow Armor", label_size); *mode = OQ_GROUP_MODE_SUM; *value = 1; return; }
+    if (!strcmp(name, "quake_armor_red")) { q_strlcpy(label, "Red Armor", label_size); *mode = OQ_GROUP_MODE_SUM; *value = 1; return; }
     if (!strcmp(name, "quake_weapon_shotgun")) { q_strlcpy(label, "Shotgun", label_size); return; }
     if (!strcmp(name, "quake_weapon_super_shotgun")) { q_strlcpy(label, "Super Shotgun", label_size); return; }
     if (!strcmp(name, "quake_weapon_nailgun")) { q_strlcpy(label, "Nailgun", label_size); return; }
@@ -782,23 +791,34 @@ static void OQ_CheckInventoryRefreshComplete(void) {
         }
     }
     
-    /* Add local items that aren't in remote to display */
-    /* Note: Items that are already marked as synced (from star_api_add_item) should NOT be added to display
-       because they're already in remote, even if they haven't appeared in the remote list yet */
+    /* Add local items to display: unsynced (pending), or synced but not yet in remote list (just added) */
     for (i = 0; i < (size_t)g_local_inventory_count && g_inventory_count < OQ_MAX_INVENTORY_ITEMS; i++) {
-        /* Skip items that are already synced - they're in remote, just not in the list yet */
-        if (g_local_inventory_synced[i])
-            continue;
-            
-        int j;
-        int exists = 0;
+        /* Skip if already in display */
+        int j, exists = 0;
         for (j = 0; j < g_inventory_count; j++) {
             if (!strcmp(g_inventory_entries[j].name, g_local_inventory_entries[i].name)) {
                 exists = 1;
                 break;
             }
         }
-        if (!exists) {
+        if (exists)
+            continue;
+        /* Synced items: only add if not in remote list yet (so just-added items show immediately) */
+        if (g_local_inventory_synced[i]) {
+            int in_remote = 0;
+            if (remote_ok) {
+                int r;
+                for (r = 0; r < remote_item_count; r++) {
+                    if (!strcmp(g_local_inventory_entries[i].name, remote_item_names[r])) {
+                        in_remote = 1;
+                        break;
+                    }
+                }
+            }
+            if (in_remote)
+                continue; /* already in display from remote list */
+        }
+        {
             oquake_inventory_entry_t* dst = &g_inventory_entries[g_inventory_count];
             q_strlcpy(dst->name, g_local_inventory_entries[i].name, sizeof(dst->name));
             q_strlcpy(dst->description, g_local_inventory_entries[i].description, sizeof(dst->description));
@@ -888,6 +908,27 @@ static void OQ_CheckInventoryRefreshComplete(void) {
         if (list)
             star_api_free_item_list(list);
         star_sync_inventory_clear_result();
+    }
+}
+
+/** Append any local items not already in g_inventory_entries so pickups show immediately. */
+static void OQ_AppendLocalToDisplay(void) {
+    int i, j;
+    for (i = 0; i < g_local_inventory_count && g_inventory_count < OQ_MAX_INVENTORY_ITEMS; i++) {
+        int exists = 0;
+        for (j = 0; j < g_inventory_count; j++) {
+            if (!strcmp(g_inventory_entries[j].name, g_local_inventory_entries[i].name)) {
+                exists = 1;
+                break;
+            }
+        }
+        if (!exists) {
+            oquake_inventory_entry_t* dst = &g_inventory_entries[g_inventory_count];
+            q_strlcpy(dst->name, g_local_inventory_entries[i].name, sizeof(dst->name));
+            q_strlcpy(dst->description, g_local_inventory_entries[i].description, sizeof(dst->description));
+            q_strlcpy(dst->item_type, g_local_inventory_entries[i].item_type, sizeof(dst->item_type));
+            g_inventory_count++;
+        }
     }
 }
 
@@ -1296,25 +1337,72 @@ static time_t OQ_GetFileTime(const char *path) {
 }
 #endif
 
-/* Save config to Quake config.cfg format */
+#define OQ_CFG_MAX_SIZE (256 * 1024)
+
+/* Returns 1 if line should be removed (OQuake STAR cvar or our comment). */
+static int OQ_IsOQuakeCfgLine(const char *line) {
+    while (*line == ' ' || *line == '\t') line++;
+    if (strstr(line, "// OQuake STAR API Configuration") != NULL) return 1;
+    if (strncmp(line, "set oquake_star_", 15) == 0) return 1;
+    if (strncmp(line, "set oasis_star_beam_face", 24) == 0) return 1;
+    return 0;
+}
+
+/* Save config to Quake config.cfg: update in place (strip old OQuake lines, append one block). */
 static int OQ_SaveQuakeConfig(const char *cfg_path) {
-    FILE *f = fopen(cfg_path, "a"); /* Append mode to not overwrite user settings */
-    if (!f) return 0;
-    
-    const char *star_url = oquake_star_api_url.string;
-    const char *oasis_url = oquake_oasis_api_url.string;
-    int beam_face = (int)oasis_star_beam_face.value;
-    
-    fprintf(f, "\n// OQuake STAR API Configuration (auto-generated)\n");
-    fprintf(f, "set oquake_star_api_url \"%s\"\n", star_url ? star_url : "");
-    fprintf(f, "set oquake_oasis_api_url \"%s\"\n", oasis_url ? oasis_url : "");
-    fprintf(f, "set oasis_star_beam_face \"%d\"\n", beam_face);
-    fprintf(f, "set oquake_star_stack_armor \"%s\"\n", oquake_star_stack_armor.string);
-    fprintf(f, "set oquake_star_stack_weapons \"%s\"\n", oquake_star_stack_weapons.string);
-    fprintf(f, "set oquake_star_stack_powerups \"%s\"\n", oquake_star_stack_powerups.string);
-    fprintf(f, "set oquake_star_stack_keys \"%s\"\n", oquake_star_stack_keys.string);
-    fprintf(f, "set oquake_star_stack_sigils \"%s\"\n", oquake_star_stack_sigils.string);
-    
+    char *buf = NULL;
+    size_t cap = OQ_CFG_MAX_SIZE;
+    size_t len = 0;
+    FILE *f = fopen(cfg_path, "rb");
+    if (f) {
+        buf = (char *)malloc(cap);
+        if (buf) {
+            len = fread(buf, 1, cap - 1, f);
+            buf[len] = '\0';
+        }
+        fclose(f);
+    }
+    f = fopen(cfg_path, "w");
+    if (!f) {
+        if (buf) free(buf);
+        return 0;
+    }
+    if (buf && len > 0) {
+        const char *p = buf;
+        while (*p) {
+            const char *eol = strchr(p, '\n');
+            if (!eol) eol = p + strlen(p);
+            if (eol > p) {
+                size_t linelen = (size_t)(eol - p);
+                if (linelen < 2048) {
+                    char line[2048];
+                    if (linelen >= sizeof(line)) linelen = sizeof(line) - 1;
+                    memcpy(line, p, linelen);
+                    line[linelen] = '\0';
+                    if (!OQ_IsOQuakeCfgLine(line))
+                        fwrite(p, 1, (size_t)(eol - p), f);
+                } else {
+                    fwrite(p, 1, (size_t)(eol - p), f);
+                }
+            }
+            if (*eol == '\n') eol++;
+            p = eol;
+        }
+        free(buf);
+    }
+    {
+        const char *star_url = oquake_star_api_url.string;
+        const char *oasis_url = oquake_oasis_api_url.string;
+        fprintf(f, "\n// OQuake STAR API Configuration (auto-generated)\n");
+        fprintf(f, "set oquake_star_api_url \"%s\"\n", star_url ? star_url : "");
+        fprintf(f, "set oquake_oasis_api_url \"%s\"\n", oasis_url ? oasis_url : "");
+        fprintf(f, "set oasis_star_beam_face \"%d\"\n", (int)oasis_star_beam_face.value);
+        fprintf(f, "set oquake_star_stack_armor \"%s\"\n", oquake_star_stack_armor.string);
+        fprintf(f, "set oquake_star_stack_weapons \"%s\"\n", oquake_star_stack_weapons.string);
+        fprintf(f, "set oquake_star_stack_powerups \"%s\"\n", oquake_star_stack_powerups.string);
+        fprintf(f, "set oquake_star_stack_keys \"%s\"\n", oquake_star_stack_keys.string);
+        fprintf(f, "set oquake_star_stack_sigils \"%s\"\n", oquake_star_stack_sigils.string);
+    }
     fclose(f);
     return 1;
 }
@@ -1458,6 +1546,16 @@ void OQuake_STAR_Init(void) {
                                     Cvar_Set("oquake_oasis_api_url", cvar_value);
                                 } else if (strcmp(cvar_name, "oasis_star_beam_face") == 0) {
                                     Cvar_SetValueQuick(&oasis_star_beam_face, atoi(cvar_value));
+                                } else if (strcmp(cvar_name, "oquake_star_stack_armor") == 0) {
+                                    Cvar_Set("oquake_star_stack_armor", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_weapons") == 0) {
+                                    Cvar_Set("oquake_star_stack_weapons", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_powerups") == 0) {
+                                    Cvar_Set("oquake_star_stack_powerups", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_keys") == 0) {
+                                    Cvar_Set("oquake_star_stack_keys", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_sigils") == 0) {
+                                    Cvar_Set("oquake_star_stack_sigils", cvar_value);
                                 }
                             }
                         }
@@ -1559,6 +1657,16 @@ void OQuake_STAR_Init(void) {
                                     Cvar_Set("oquake_oasis_api_url", cvar_value);
                                 } else if (strcmp(cvar_name, "oasis_star_beam_face") == 0) {
                                     Cvar_SetValueQuick(&oasis_star_beam_face, atoi(cvar_value));
+                                } else if (strcmp(cvar_name, "oquake_star_stack_armor") == 0) {
+                                    Cvar_Set("oquake_star_stack_armor", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_weapons") == 0) {
+                                    Cvar_Set("oquake_star_stack_weapons", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_powerups") == 0) {
+                                    Cvar_Set("oquake_star_stack_powerups", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_keys") == 0) {
+                                    Cvar_Set("oquake_star_stack_keys", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_sigils") == 0) {
+                                    Cvar_Set("oquake_star_stack_sigils", cvar_value);
                                 }
                             }
                         }
@@ -1643,6 +1751,16 @@ void OQuake_STAR_Init(void) {
                                     Cvar_Set("oquake_oasis_api_url", cvar_value);
                                 } else if (strcmp(cvar_name, "oasis_star_beam_face") == 0) {
                                     Cvar_SetValueQuick(&oasis_star_beam_face, atoi(cvar_value));
+                                } else if (strcmp(cvar_name, "oquake_star_stack_armor") == 0) {
+                                    Cvar_Set("oquake_star_stack_armor", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_weapons") == 0) {
+                                    Cvar_Set("oquake_star_stack_weapons", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_powerups") == 0) {
+                                    Cvar_Set("oquake_star_stack_powerups", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_keys") == 0) {
+                                    Cvar_Set("oquake_star_stack_keys", cvar_value);
+                                } else if (strcmp(cvar_name, "oquake_star_stack_sigils") == 0) {
+                                    Cvar_Set("oquake_star_stack_sigils", cvar_value);
                                 }
                             }
                         }
@@ -1805,7 +1923,7 @@ void OQuake_STAR_Cleanup(void) {
 }
 
 void OQuake_STAR_OnKeyPickup(const char* key_name) {
-    if (!key_name)
+    if (!key_name || !g_star_initialized)
         return;
     const char* desc = get_key_description(key_name);
     if (OQ_StackKeys()) {
@@ -1828,11 +1946,13 @@ void OQuake_STAR_OnKeyPickup(const char* key_name) {
     }
 }
 
-void OQuake_STAR_OnItemsChanged(unsigned int old_items, unsigned int new_items)
+void OQuake_STAR_OnItemsChangedEx(unsigned int old_items, unsigned int new_items, int in_real_game)
 {
     unsigned int gained = new_items & ~old_items;
     int added = 0;
 
+    if (!in_real_game || !g_star_initialized)
+        return;
     if (gained == 0)
         return;
 
@@ -1865,17 +1985,19 @@ void OQuake_STAR_OnItemsChanged(unsigned int old_items, unsigned int new_items)
 
     if (added > 0) {
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d new pickup(s)", added);
+        OQ_AppendLocalToDisplay(); /* show new items immediately */
         OQ_RefreshInventoryCache();
     }
 }
 
-void OQuake_STAR_OnStatsChanged(
-    int old_shells, int new_shells,
-    int old_nails, int new_nails,
-    int old_rockets, int new_rockets,
-    int old_cells, int new_cells,
-    int old_health, int new_health,
-    int old_armor, int new_armor)
+void OQuake_STAR_OnItemsChanged(unsigned int old_items, unsigned int new_items) {
+    OQuake_STAR_OnItemsChangedEx(old_items, new_items, 1);
+}
+
+void OQuake_STAR_OnStatsChangedEx(
+    int old_shells, int new_shells, int old_nails, int new_nails,
+    int old_rockets, int new_rockets, int old_cells, int new_cells,
+    int old_health, int new_health, int old_armor, int new_armor, int in_real_game)
 {
     int added = 0;
     char desc[96];
@@ -1883,6 +2005,8 @@ void OQuake_STAR_OnStatsChanged(
     (void)new_health;
     (void)old_armor;
     (void)new_armor;
+    if (!in_real_game || !g_star_initialized)
+        return;
     if (new_shells > old_shells) {
         q_snprintf(desc, sizeof(desc), "Shells pickup +%d", new_shells - old_shells);
         added += OQ_AddInventoryEvent("quake_pickup_shells", desc, "Ammo");
@@ -1901,8 +2025,63 @@ void OQuake_STAR_OnStatsChanged(
     }
     if (added > 0) {
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d pickup event(s)", added);
+        OQ_AppendLocalToDisplay(); /* show new items immediately */
         OQ_RefreshInventoryCache();
     }
+}
+
+void OQuake_STAR_OnStatsChanged(
+    int old_shells, int new_shells,
+    int old_nails, int new_nails,
+    int old_rockets, int new_rockets,
+    int old_cells, int new_cells,
+    int old_health, int new_health,
+    int old_armor, int new_armor)
+{
+    OQuake_STAR_OnStatsChangedEx(old_shells, new_shells, old_nails, new_nails,
+        old_rockets, new_rockets, old_cells, new_cells,
+        old_health, new_health, old_armor, new_armor, 1);
+}
+
+/* Frame-based item/stats poll so pickups are reported even when sbar isn't drawn. Call from Host_Frame. */
+void OQuake_STAR_PollItems(void) {
+    extern client_state_t cl;
+    extern client_static_t cls;
+    extern server_t sv;
+    static unsigned int poll_prev_items = 0;
+    static int poll_prev_shells = -1, poll_prev_nails = -1, poll_prev_rockets = -1, poll_prev_cells = -1;
+    static int poll_prev_health = -1, poll_prev_armor = -1;
+    static int poll_prev_valid = 0;
+
+    if (!sv.active || cls.demoplayback) {
+        poll_prev_items = (unsigned int)cl.items;
+        poll_prev_shells = cl.stats[STAT_SHELLS];
+        poll_prev_nails = cl.stats[STAT_NAILS];
+        poll_prev_rockets = cl.stats[STAT_ROCKETS];
+        poll_prev_cells = cl.stats[STAT_CELLS];
+        poll_prev_health = cl.stats[STAT_HEALTH];
+        poll_prev_armor = cl.stats[STAT_ARMOR];
+        poll_prev_valid = 1;
+        return;
+    }
+    OQuake_STAR_OnItemsChangedEx(poll_prev_items, (unsigned int)cl.items, 1);
+    poll_prev_items = (unsigned int)cl.items;
+    if (poll_prev_valid) {
+        OQuake_STAR_OnStatsChangedEx(
+            poll_prev_shells, cl.stats[STAT_SHELLS],
+            poll_prev_nails, cl.stats[STAT_NAILS],
+            poll_prev_rockets, cl.stats[STAT_ROCKETS],
+            poll_prev_cells, cl.stats[STAT_CELLS],
+            poll_prev_health, cl.stats[STAT_HEALTH],
+            poll_prev_armor, cl.stats[STAT_ARMOR], 1);
+    }
+    poll_prev_shells = cl.stats[STAT_SHELLS];
+    poll_prev_nails = cl.stats[STAT_NAILS];
+    poll_prev_rockets = cl.stats[STAT_ROCKETS];
+    poll_prev_cells = cl.stats[STAT_CELLS];
+    poll_prev_health = cl.stats[STAT_HEALTH];
+    poll_prev_armor = cl.stats[STAT_ARMOR];
+    poll_prev_valid = 1;
 }
 
 int OQuake_STAR_CheckDoorAccess(const char* door_targetname, const char* required_key_name) {
