@@ -46,6 +46,12 @@ cvar_t oquake_star_username = {"oquake_star_username", "", 0};
 cvar_t oquake_star_password = {"oquake_star_password", "", 0};
 cvar_t oquake_star_api_key = {"oquake_star_api_key", "", 0};
 cvar_t oquake_star_avatar_id = {"oquake_star_avatar_id", "", 0};
+/* Stack (1) = each pickup adds to quantity; Unlock (0) = one per type. Ammo always stacks. Default 1. */
+cvar_t oquake_star_stack_armor = {"oquake_star_stack_armor", "1", CVAR_ARCHIVE};
+cvar_t oquake_star_stack_weapons = {"oquake_star_stack_weapons", "1", CVAR_ARCHIVE};
+cvar_t oquake_star_stack_powerups = {"oquake_star_stack_powerups", "1", CVAR_ARCHIVE};
+cvar_t oquake_star_stack_keys = {"oquake_star_stack_keys", "1", CVAR_ARCHIVE};
+cvar_t oquake_star_stack_sigils = {"oquake_star_stack_sigils", "1", CVAR_ARCHIVE};
 
 enum {
     OQ_TAB_KEYS = 0,
@@ -215,6 +221,13 @@ static int OQ_BuildFilteredIndices(int* out_indices, int max_indices)
     return count;
 }
 
+/* Return true if cvar is set to stack (1), false for unlock (0). Ammo always stacks. */
+static qboolean OQ_StackArmor(void)    { return atoi(oquake_star_stack_armor.string) != 0; }
+static qboolean OQ_StackWeapons(void)  { return atoi(oquake_star_stack_weapons.string) != 0; }
+static qboolean OQ_StackPowerups(void) { return atoi(oquake_star_stack_powerups.string) != 0; }
+static qboolean OQ_StackKeys(void)     { return atoi(oquake_star_stack_keys.string) != 0; }
+static qboolean OQ_StackSigils(void)   { return atoi(oquake_star_stack_sigils.string) != 0; }
+
 static int OQ_ParsePickupDelta(const char* description)
 {
     const char* plus;
@@ -289,6 +302,20 @@ static void OQ_GetGroupedDisplayInfo(const oquake_inventory_entry_t* item, char*
         q_strlcpy(label, "Megahealth", label_size);
         return;
     }
+    /* Stack-style weapon events (when stack_weapons is 1) */
+    if (!strncmp(name, "quake_pickup_weapon_shotgun", 27)) { q_strlcpy(label, "Shotgun", label_size); return; }
+    if (!strncmp(name, "quake_pickup_weapon_super_shotgun", 32)) { q_strlcpy(label, "Super Shotgun", label_size); return; }
+    if (!strncmp(name, "quake_pickup_weapon_nailgun", 26)) { q_strlcpy(label, "Nailgun", label_size); return; }
+    if (!strncmp(name, "quake_pickup_weapon_super_nailgun", 31)) { q_strlcpy(label, "Super Nailgun", label_size); return; }
+    if (!strncmp(name, "quake_pickup_weapon_grenade_launcher", 36)) { q_strlcpy(label, "Grenade Launcher", label_size); return; }
+    if (!strncmp(name, "quake_pickup_weapon_rocket_launcher", 35)) { q_strlcpy(label, "Rocket Launcher", label_size); return; }
+    if (!strncmp(name, "quake_pickup_weapon_lightning", 29)) { q_strlcpy(label, "Lightning Gun", label_size); return; }
+    if (!strncmp(name, "quake_pickup_weapon_super_lightning", 34)) { q_strlcpy(label, "Super Lightning", label_size); return; }
+    /* Stack-style sigil events (when stack_sigils is 1) */
+    if (!strncmp(name, "quake_pickup_sigil_1", 20)) { q_strlcpy(label, "Sigil Piece 1", label_size); return; }
+    if (!strncmp(name, "quake_pickup_sigil_2", 20)) { q_strlcpy(label, "Sigil Piece 2", label_size); return; }
+    if (!strncmp(name, "quake_pickup_sigil_3", 20)) { q_strlcpy(label, "Sigil Piece 3", label_size); return; }
+    if (!strncmp(name, "quake_pickup_sigil_4", 20)) { q_strlcpy(label, "Sigil Piece 4", label_size); return; }
 
     if (!strcmp(name, OQUAKE_ITEM_SILVER_KEY)) {
         q_strlcpy(label, "Silver Key", label_size);
@@ -298,6 +325,42 @@ static void OQ_GetGroupedDisplayInfo(const oquake_inventory_entry_t* item, char*
         q_strlcpy(label, "Gold Key", label_size);
         return;
     }
+    if (!strncmp(name, "quake_pickup_key_silver_", 24)) {
+        q_strlcpy(label, "Silver Key", label_size);
+        *mode = OQ_GROUP_MODE_SUM;
+        *value = 1;
+        return;
+    }
+    if (!strncmp(name, "quake_pickup_key_gold_", 22)) {
+        q_strlcpy(label, "Gold Key", label_size);
+        *mode = OQ_GROUP_MODE_SUM;
+        *value = 1;
+        return;
+    }
+    /* Unlock-style names (when stack_* is 0) */
+    if (!strcmp(name, "quake_armor_green") || !strcmp(name, "quake_armor_yellow") || !strcmp(name, "quake_armor_red")) {
+        q_strlcpy(label, "Armor", label_size);
+        *mode = OQ_GROUP_MODE_SUM;
+        *value = 1;
+        return;
+    }
+    if (!strcmp(name, "quake_weapon_shotgun")) { q_strlcpy(label, "Shotgun", label_size); return; }
+    if (!strcmp(name, "quake_weapon_super_shotgun")) { q_strlcpy(label, "Super Shotgun", label_size); return; }
+    if (!strcmp(name, "quake_weapon_nailgun")) { q_strlcpy(label, "Nailgun", label_size); return; }
+    if (!strcmp(name, "quake_weapon_super_nailgun")) { q_strlcpy(label, "Super Nailgun", label_size); return; }
+    if (!strcmp(name, "quake_weapon_grenade_launcher")) { q_strlcpy(label, "Grenade Launcher", label_size); return; }
+    if (!strcmp(name, "quake_weapon_rocket_launcher")) { q_strlcpy(label, "Rocket Launcher", label_size); return; }
+    if (!strcmp(name, "quake_weapon_lightning")) { q_strlcpy(label, "Lightning Gun", label_size); return; }
+    if (!strcmp(name, "quake_weapon_super_lightning")) { q_strlcpy(label, "Super Lightning", label_size); return; }
+    if (!strcmp(name, "quake_powerup_megahealth")) { q_strlcpy(label, "Megahealth", label_size); return; }
+    if (!strcmp(name, "quake_powerup_invisibility")) { q_strlcpy(label, "Ring of Shadows", label_size); return; }
+    if (!strcmp(name, "quake_powerup_invulnerability")) { q_strlcpy(label, "Pentagram of Protection", label_size); return; }
+    if (!strcmp(name, "quake_powerup_suit")) { q_strlcpy(label, "Biosuit", label_size); return; }
+    if (!strcmp(name, "quake_powerup_quad")) { q_strlcpy(label, "Quad Damage", label_size); return; }
+    if (!strcmp(name, "quake_sigil_1")) { q_strlcpy(label, "Sigil Piece 1", label_size); return; }
+    if (!strcmp(name, "quake_sigil_2")) { q_strlcpy(label, "Sigil Piece 2", label_size); return; }
+    if (!strcmp(name, "quake_sigil_3")) { q_strlcpy(label, "Sigil Piece 3", label_size); return; }
+    if (!strcmp(name, "quake_sigil_4")) { q_strlcpy(label, "Sigil Piece 4", label_size); return; }
 
     q_strlcpy(label, name, label_size);
 }
@@ -1158,6 +1221,26 @@ static int OQ_LoadJsonConfig(const char *json_path) {
         Cvar_SetValueQuick(&oasis_star_beam_face, atoi(value));
         loaded = 1;
     }
+    if (OQ_ExtractJsonValue(json, "stack_armor", value, sizeof(value))) {
+        Cvar_Set("oquake_star_stack_armor", value);
+        loaded = 1;
+    }
+    if (OQ_ExtractJsonValue(json, "stack_weapons", value, sizeof(value))) {
+        Cvar_Set("oquake_star_stack_weapons", value);
+        loaded = 1;
+    }
+    if (OQ_ExtractJsonValue(json, "stack_powerups", value, sizeof(value))) {
+        Cvar_Set("oquake_star_stack_powerups", value);
+        loaded = 1;
+    }
+    if (OQ_ExtractJsonValue(json, "stack_keys", value, sizeof(value))) {
+        Cvar_Set("oquake_star_stack_keys", value);
+        loaded = 1;
+    }
+    if (OQ_ExtractJsonValue(json, "stack_sigils", value, sizeof(value))) {
+        Cvar_Set("oquake_star_stack_sigils", value);
+        loaded = 1;
+    }
     
     return loaded;
 }
@@ -1170,11 +1253,21 @@ static int OQ_SaveJsonConfig(const char *json_path) {
     const char *star_url = oquake_star_api_url.string;
     const char *oasis_url = oquake_oasis_api_url.string;
     int beam_face = (int)oasis_star_beam_face.value;
+    const char *s_armor = oquake_star_stack_armor.string;
+    const char *s_weapons = oquake_star_stack_weapons.string;
+    const char *s_powerups = oquake_star_stack_powerups.string;
+    const char *s_keys = oquake_star_stack_keys.string;
+    const char *s_sigils = oquake_star_stack_sigils.string;
     
     fprintf(f, "{\n");
     fprintf(f, "  \"star_api_url\": \"%s\",\n", star_url ? star_url : "");
     fprintf(f, "  \"oasis_api_url\": \"%s\",\n", oasis_url ? oasis_url : "");
-    fprintf(f, "  \"beam_face\": %d\n", beam_face);
+    fprintf(f, "  \"beam_face\": %d,\n", beam_face);
+    fprintf(f, "  \"stack_armor\": %s,\n", (s_armor && atoi(s_armor)) ? "1" : "0");
+    fprintf(f, "  \"stack_weapons\": %s,\n", (s_weapons && atoi(s_weapons)) ? "1" : "0");
+    fprintf(f, "  \"stack_powerups\": %s,\n", (s_powerups && atoi(s_powerups)) ? "1" : "0");
+    fprintf(f, "  \"stack_keys\": %s,\n", (s_keys && atoi(s_keys)) ? "1" : "0");
+    fprintf(f, "  \"stack_sigils\": %s\n", (s_sigils && atoi(s_sigils)) ? "1" : "0");
     fprintf(f, "}\n");
     
     fclose(f);
@@ -1216,6 +1309,11 @@ static int OQ_SaveQuakeConfig(const char *cfg_path) {
     fprintf(f, "set oquake_star_api_url \"%s\"\n", star_url ? star_url : "");
     fprintf(f, "set oquake_oasis_api_url \"%s\"\n", oasis_url ? oasis_url : "");
     fprintf(f, "set oasis_star_beam_face \"%d\"\n", beam_face);
+    fprintf(f, "set oquake_star_stack_armor \"%s\"\n", oquake_star_stack_armor.string);
+    fprintf(f, "set oquake_star_stack_weapons \"%s\"\n", oquake_star_stack_weapons.string);
+    fprintf(f, "set oquake_star_stack_powerups \"%s\"\n", oquake_star_stack_powerups.string);
+    fprintf(f, "set oquake_star_stack_keys \"%s\"\n", oquake_star_stack_keys.string);
+    fprintf(f, "set oquake_star_stack_sigils \"%s\"\n", oquake_star_stack_sigils.string);
     
     fclose(f);
     return 1;
@@ -1274,6 +1372,11 @@ void OQuake_STAR_Init(void) {
     Cvar_RegisterVariable(&oquake_star_password);
     Cvar_RegisterVariable(&oquake_star_api_key);
     Cvar_RegisterVariable(&oquake_star_avatar_id);
+    Cvar_RegisterVariable(&oquake_star_stack_armor);
+    Cvar_RegisterVariable(&oquake_star_stack_weapons);
+    Cvar_RegisterVariable(&oquake_star_stack_powerups);
+    Cvar_RegisterVariable(&oquake_star_stack_keys);
+    Cvar_RegisterVariable(&oquake_star_stack_sigils);
 
     if (!g_star_console_registered) {
         Cmd_AddCommand("star", OQuake_STAR_Console_f);
@@ -1705,12 +1808,23 @@ void OQuake_STAR_OnKeyPickup(const char* key_name) {
     if (!key_name)
         return;
     const char* desc = get_key_description(key_name);
-    if (OQ_AddInventoryUnlockIfMissing(key_name, desc, "KeyItem")) {
-        printf("OQuake STAR API: Added %s to cross-game inventory.\n", key_name);
-        q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Collected: %s", key_name);
-        OQ_RefreshInventoryCache();
+    if (OQ_StackKeys()) {
+        const char* event_name = !strcmp(key_name, OQUAKE_ITEM_SILVER_KEY) ? "quake_pickup_key_silver" : "quake_pickup_key_gold";
+        if (OQ_AddInventoryEvent(event_name, desc, "KeyItem")) {
+            printf("OQuake STAR API: Added %s to cross-game inventory.\n", key_name);
+            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Collected: %s", key_name);
+            OQ_RefreshInventoryCache();
+        } else {
+            printf("OQuake STAR API: Failed to add %s: %s\n", key_name, star_api_get_last_error());
+        }
     } else {
-        printf("OQuake STAR API: Failed to add %s: %s\n", key_name, star_api_get_last_error());
+        if (OQ_AddInventoryUnlockIfMissing(key_name, desc, "KeyItem")) {
+            printf("OQuake STAR API: Added %s to cross-game inventory.\n", key_name);
+            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Collected: %s", key_name);
+            OQ_RefreshInventoryCache();
+        } else {
+            printf("OQuake STAR API: Failed to add %s: %s\n", key_name, star_api_get_last_error());
+        }
     }
 }
 
@@ -1722,29 +1836,29 @@ void OQuake_STAR_OnItemsChanged(unsigned int old_items, unsigned int new_items)
     if (gained == 0)
         return;
 
-    if (gained & IT_SHOTGUN) added += OQ_AddInventoryUnlockIfMissing("quake_weapon_shotgun", "Shotgun discovered", "Weapon");
-    if (gained & IT_SUPER_SHOTGUN) added += OQ_AddInventoryUnlockIfMissing("quake_weapon_super_shotgun", "Super Shotgun discovered", "Weapon");
-    if (gained & IT_NAILGUN) added += OQ_AddInventoryUnlockIfMissing("quake_weapon_nailgun", "Nailgun discovered", "Weapon");
-    if (gained & IT_SUPER_NAILGUN) added += OQ_AddInventoryUnlockIfMissing("quake_weapon_super_nailgun", "Super Nailgun discovered", "Weapon");
-    if (gained & IT_GRENADE_LAUNCHER) added += OQ_AddInventoryUnlockIfMissing("quake_weapon_grenade_launcher", "Grenade Launcher discovered", "Weapon");
-    if (gained & IT_ROCKET_LAUNCHER) added += OQ_AddInventoryUnlockIfMissing("quake_weapon_rocket_launcher", "Rocket Launcher discovered", "Weapon");
-    if (gained & IT_LIGHTNING) added += OQ_AddInventoryUnlockIfMissing("quake_weapon_lightning", "Lightning Gun discovered", "Weapon");
-    if (gained & IT_SUPER_LIGHTNING) added += OQ_AddInventoryUnlockIfMissing("quake_weapon_super_lightning", "Super Lightning discovered", "Weapon");
+    if (gained & IT_SHOTGUN) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("quake_pickup_weapon_shotgun", "Shotgun discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("quake_weapon_shotgun", "Shotgun discovered", "Weapon");
+    if (gained & IT_SUPER_SHOTGUN) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("quake_pickup_weapon_super_shotgun", "Super Shotgun discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("quake_weapon_super_shotgun", "Super Shotgun discovered", "Weapon");
+    if (gained & IT_NAILGUN) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("quake_pickup_weapon_nailgun", "Nailgun discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("quake_weapon_nailgun", "Nailgun discovered", "Weapon");
+    if (gained & IT_SUPER_NAILGUN) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("quake_pickup_weapon_super_nailgun", "Super Nailgun discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("quake_weapon_super_nailgun", "Super Nailgun discovered", "Weapon");
+    if (gained & IT_GRENADE_LAUNCHER) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("quake_pickup_weapon_grenade_launcher", "Grenade Launcher discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("quake_weapon_grenade_launcher", "Grenade Launcher discovered", "Weapon");
+    if (gained & IT_ROCKET_LAUNCHER) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("quake_pickup_weapon_rocket_launcher", "Rocket Launcher discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("quake_weapon_rocket_launcher", "Rocket Launcher discovered", "Weapon");
+    if (gained & IT_LIGHTNING) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("quake_pickup_weapon_lightning", "Lightning Gun discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("quake_weapon_lightning", "Lightning Gun discovered", "Weapon");
+    if (gained & IT_SUPER_LIGHTNING) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("quake_pickup_weapon_super_lightning", "Super Lightning discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("quake_weapon_super_lightning", "Super Lightning discovered", "Weapon");
 
-    if (gained & IT_ARMOR1) added += OQ_AddInventoryUnlockIfMissing("quake_armor_green", "Green Armor acquired", "Armor");
-    if (gained & IT_ARMOR2) added += OQ_AddInventoryUnlockIfMissing("quake_armor_yellow", "Yellow Armor acquired", "Armor");
-    if (gained & IT_ARMOR3) added += OQ_AddInventoryUnlockIfMissing("quake_armor_red", "Red Armor acquired", "Armor");
+    if (gained & IT_ARMOR1) added += OQ_StackArmor() ? OQ_AddInventoryEvent("quake_pickup_armor_green", "Green Armor +1", "Armor") : OQ_AddInventoryUnlockIfMissing("quake_armor_green", "Green Armor", "Armor");
+    if (gained & IT_ARMOR2) added += OQ_StackArmor() ? OQ_AddInventoryEvent("quake_pickup_armor_yellow", "Yellow Armor +1", "Armor") : OQ_AddInventoryUnlockIfMissing("quake_armor_yellow", "Yellow Armor", "Armor");
+    if (gained & IT_ARMOR3) added += OQ_StackArmor() ? OQ_AddInventoryEvent("quake_pickup_armor_red", "Red Armor +1", "Armor") : OQ_AddInventoryUnlockIfMissing("quake_armor_red", "Red Armor", "Armor");
 
-    if (gained & IT_SUPERHEALTH) added += OQ_AddInventoryEvent("quake_pickup_megahealth", "Megahealth pickup", "Powerup");
-    if (gained & IT_INVISIBILITY) added += OQ_AddInventoryEvent("quake_pickup_invisibility", "Ring of Shadows pickup", "Powerup");
-    if (gained & IT_INVULNERABILITY) added += OQ_AddInventoryEvent("quake_pickup_invulnerability", "Pentagram of Protection pickup", "Powerup");
-    if (gained & IT_SUIT) added += OQ_AddInventoryEvent("quake_pickup_suit", "Biosuit pickup", "Powerup");
-    if (gained & IT_QUAD) added += OQ_AddInventoryEvent("quake_pickup_quad", "Quad Damage pickup", "Powerup");
+    if (gained & IT_SUPERHEALTH) added += OQ_StackPowerups() ? OQ_AddInventoryEvent("quake_pickup_megahealth", "Megahealth pickup", "Powerup") : OQ_AddInventoryUnlockIfMissing("quake_powerup_megahealth", "Megahealth", "Powerup");
+    if (gained & IT_INVISIBILITY) added += OQ_StackPowerups() ? OQ_AddInventoryEvent("quake_pickup_invisibility", "Ring of Shadows pickup", "Powerup") : OQ_AddInventoryUnlockIfMissing("quake_powerup_invisibility", "Ring of Shadows", "Powerup");
+    if (gained & IT_INVULNERABILITY) added += OQ_StackPowerups() ? OQ_AddInventoryEvent("quake_pickup_invulnerability", "Pentagram of Protection pickup", "Powerup") : OQ_AddInventoryUnlockIfMissing("quake_powerup_invulnerability", "Pentagram of Protection", "Powerup");
+    if (gained & IT_SUIT) added += OQ_StackPowerups() ? OQ_AddInventoryEvent("quake_pickup_suit", "Biosuit pickup", "Powerup") : OQ_AddInventoryUnlockIfMissing("quake_powerup_suit", "Biosuit", "Powerup");
+    if (gained & IT_QUAD) added += OQ_StackPowerups() ? OQ_AddInventoryEvent("quake_pickup_quad", "Quad Damage pickup", "Powerup") : OQ_AddInventoryUnlockIfMissing("quake_powerup_quad", "Quad Damage", "Powerup");
 
-    if (gained & IT_SIGIL1) added += OQ_AddInventoryUnlockIfMissing("quake_sigil_1", "Sigil Piece 1 acquired", "Artifact");
-    if (gained & IT_SIGIL2) added += OQ_AddInventoryUnlockIfMissing("quake_sigil_2", "Sigil Piece 2 acquired", "Artifact");
-    if (gained & IT_SIGIL3) added += OQ_AddInventoryUnlockIfMissing("quake_sigil_3", "Sigil Piece 3 acquired", "Artifact");
-    if (gained & IT_SIGIL4) added += OQ_AddInventoryUnlockIfMissing("quake_sigil_4", "Sigil Piece 4 acquired", "Artifact");
+    if (gained & IT_SIGIL1) added += OQ_StackSigils() ? OQ_AddInventoryEvent("quake_pickup_sigil_1", "Sigil Piece 1 acquired", "Artifact") : OQ_AddInventoryUnlockIfMissing("quake_sigil_1", "Sigil Piece 1 acquired", "Artifact");
+    if (gained & IT_SIGIL2) added += OQ_StackSigils() ? OQ_AddInventoryEvent("quake_pickup_sigil_2", "Sigil Piece 2 acquired", "Artifact") : OQ_AddInventoryUnlockIfMissing("quake_sigil_2", "Sigil Piece 2 acquired", "Artifact");
+    if (gained & IT_SIGIL3) added += OQ_StackSigils() ? OQ_AddInventoryEvent("quake_pickup_sigil_3", "Sigil Piece 3 acquired", "Artifact") : OQ_AddInventoryUnlockIfMissing("quake_sigil_3", "Sigil Piece 3 acquired", "Artifact");
+    if (gained & IT_SIGIL4) added += OQ_StackSigils() ? OQ_AddInventoryEvent("quake_pickup_sigil_4", "Sigil Piece 4 acquired", "Artifact") : OQ_AddInventoryUnlockIfMissing("quake_sigil_4", "Sigil Piece 4 acquired", "Artifact");
 
     if (gained & IT_KEY1) OQuake_STAR_OnKeyPickup(OQUAKE_ITEM_SILVER_KEY);
     if (gained & IT_KEY2) OQuake_STAR_OnKeyPickup(OQUAKE_ITEM_GOLD_KEY);
