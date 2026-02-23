@@ -25,11 +25,23 @@
 #include <sys/stat.h>
 #endif
 
+#ifndef STAR_API_HAS_SEND_ITEM
+/* Forward declare send-item API when using an older star_api.h. Link with updated star_api.lib. */
+star_api_result_t star_api_send_item_to_avatar(const char* target_username_or_avatar_id, const char* item_name, int quantity, const char* item_id);
+star_api_result_t star_api_send_item_to_clan(const char* clan_name_or_target, const char* item_name, int quantity, const char* item_id);
+#endif
+
 static star_api_config_t g_star_config;
 static int g_star_initialized = 0;
 static int g_star_console_registered = 0;
 static char g_star_username[64] = {0};
 static char g_json_config_path[512] = {0};
+/* Last pickup synced to STAR (for star lastpickup). */
+static char g_star_last_pickup_name[256] = {0};
+static char g_star_last_pickup_desc[512] = {0};
+static char g_star_last_pickup_type[64] = {0};
+static qboolean g_star_has_last_pickup = false;
+static qboolean g_star_debug_logging = false;
 
 /* key binding helpers from keys.c */
 extern char *keybindings[MAX_KEYS];
@@ -72,6 +84,7 @@ typedef struct oquake_inventory_entry_s {
     char name[256];
     char description[512];
     char item_type[64];
+    char id[64];  /* STAR inventory item Guid (empty for local-only entries) */
 } oquake_inventory_entry_t;
 
 static oquake_inventory_entry_t g_inventory_entries[OQ_MAX_INVENTORY_ITEMS];
@@ -137,6 +150,7 @@ static int OQ_AddInventoryUnlockIfMissing(const char* item_name, const char* des
         q_strlcpy(dst->name, item_name, sizeof(dst->name));
         q_strlcpy(dst->description, description ? description : "", sizeof(dst->description));
         q_strlcpy(dst->item_type, item_type ? item_type : "Item", sizeof(dst->item_type));
+        dst->id[0] = '\0';
         g_local_inventory_synced[i] = false;
         local_added = 1;
     }
@@ -177,6 +191,7 @@ static int OQ_AddInventoryEvent(const char* item_prefix, const char* description
         q_strlcpy(dst->name, item_name, sizeof(dst->name));
         q_strlcpy(dst->description, description ? description : "", sizeof(dst->description));
         q_strlcpy(dst->item_type, item_type ? item_type : "Item", sizeof(dst->item_type));
+        dst->id[0] = '\0';
         g_local_inventory_synced[g_local_inventory_count] = false;
         g_local_inventory_count++;
         local_added = 1;
@@ -552,14 +567,23 @@ static void OQ_SendSelectedItem(void)
     if (qty > available)
         qty = available;
 
-    q_snprintf(
-        g_inventory_status,
-        sizeof(g_inventory_status),
-        "Mock sent %d x '%s' to %s '%s'.",
-        qty,
-        item->name,
-        send_kind,
-        g_inventory_send_target);
+    {
+        const char* item_id;
+        if (item->id[0] != '\0')
+            item_id = (const char*)item->id;
+        else
+            item_id = NULL;
+        star_api_result_t res = STAR_API_SUCCESS;
+        if (g_inventory_send_popup == OQ_SEND_POPUP_CLAN)
+            res = (star_api_result_t)star_api_send_item_to_clan(g_inventory_send_target, item->name, qty, item_id);
+        else
+            res = (star_api_result_t)star_api_send_item_to_avatar(g_inventory_send_target, item->name, qty, item_id);
+        if (res == STAR_API_SUCCESS)
+            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Sent %d x '%s' to %s.", qty, item->name, send_kind);
+        else
+            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Send failed: %s", star_api_get_last_error());
+        OQ_RefreshInventoryCache();
+    }
     g_inventory_send_popup = OQ_SEND_POPUP_NONE;
 }
 
@@ -680,6 +704,13 @@ static int OQ_IsMockAnorakCredentials(const char* username, const char* password
     return q_strcasecmp(username, "anorak") == 0 || q_strcasecmp(username, "avatar") == 0;
 }
 
+/* 1 if current user is dellams or anorak (for add, pickup keycard, bossnft, deploynft). */
+static qboolean OQ_AllowPrivilegedCommands(void) {
+    const char* u = g_star_username[0] ? g_star_username : (oquake_star_username.string && oquake_star_username.string[0] ? oquake_star_username.string : "");
+    if (!u || !u[0]) return false;
+    return (q_strcasecmp(u, "dellams") == 0 || q_strcasecmp(u, "anorak") == 0);
+}
+
 static void OQ_CheckAuthenticationComplete(void) {
     int poll = star_sync_auth_poll();
     if (poll != 1)
@@ -745,6 +776,7 @@ static void OQ_CheckInventoryRefreshComplete(void) {
                 q_strlcpy(dst->name, list->items[i].name, sizeof(dst->name));
                 q_strlcpy(dst->description, list->items[i].description, sizeof(dst->description));
                 q_strlcpy(dst->item_type, list->items[i].item_type, sizeof(dst->item_type));
+                q_strlcpy(dst->id, list->items[i].id, sizeof(dst->id));
                 g_inventory_count++;
                 q_strlcpy(remote_item_names[remote_item_count], list->items[i].name, sizeof(remote_item_names[remote_item_count]));
                 remote_item_count++;
@@ -823,6 +855,7 @@ static void OQ_CheckInventoryRefreshComplete(void) {
             q_strlcpy(dst->name, g_local_inventory_entries[i].name, sizeof(dst->name));
             q_strlcpy(dst->description, g_local_inventory_entries[i].description, sizeof(dst->description));
             q_strlcpy(dst->item_type, g_local_inventory_entries[i].item_type, sizeof(dst->item_type));
+            dst->id[0] = '\0';  /* local entries have no STAR id until synced */
             g_inventory_count++;
         }
     }
@@ -927,6 +960,7 @@ static void OQ_AppendLocalToDisplay(void) {
             q_strlcpy(dst->name, g_local_inventory_entries[i].name, sizeof(dst->name));
             q_strlcpy(dst->description, g_local_inventory_entries[i].description, sizeof(dst->description));
             q_strlcpy(dst->item_type, g_local_inventory_entries[i].item_type, sizeof(dst->item_type));
+            dst->id[0] = '\0';
             g_inventory_count++;
         }
     }
@@ -961,7 +995,7 @@ static void OQ_RefreshInventoryCache(void) {
             d->synced = g_local_inventory_synced[l] ? 1 : 0;
         }
     }
-    star_sync_inventory_start(g_star_sync_local_items, g_local_inventory_count, "Quake");
+    star_sync_inventory_start(g_star_sync_local_items, g_local_inventory_count, "Quake", NULL, NULL);
 }
 
 static void OQ_InventoryToggle_f(void) {
@@ -2162,10 +2196,17 @@ void OQuake_STAR_Console_f(void) {
         Con_Printf("  star version        - Show integration and API status\n");
         Con_Printf("  star status         - Show init state and last error\n");
         Con_Printf("  star inventory      - List items in STAR inventory\n");
+        Con_Printf("  star lastpickup     - Show most recent synced pickup\n");
         Con_Printf("  star has <item>     - Check if you have an item (e.g. silver_key)\n");
-        Con_Printf("  star add <item> [desc] [type] - Add item\n");
+        Con_Printf("  star add <item> [desc] [type] - Add item (dellams/anorak only)\n");
         Con_Printf("  star use <item> [context]     - Use item\n");
-        Con_Printf("  star pickup keycard <silver|gold> - Add OQuake key (convenience)\n");
+        Con_Printf("  star quest start|objective|complete ... - Quest progress\n");
+        Con_Printf("  star bossnft <name> [desc]    - Create boss NFT (dellams/anorak only)\n");
+        Con_Printf("  star deploynft <nft_id> <game> [loc] - Deploy boss NFT\n");
+        Con_Printf("  star pickup keycard <silver|gold> - Add OQuake key (dellams/anorak only)\n");
+        Con_Printf("  star debug on|off|status - Toggle STAR debug logging\n");
+        Con_Printf("  star send_avatar <user> <item_class> - Send item to avatar\n");
+        Con_Printf("  star send_clan <clan> <item_class>   - Send item to clan\n");
         Con_Printf("  star beamin <username> <password> - Log in inside Quake\n");
         Con_Printf("  star beamed in <username> <password> - Alias for beamin\n");
         Con_Printf("  star beamin   - Log in using STAR_USERNAME/STAR_PASSWORD or API key\n");
@@ -2191,6 +2232,7 @@ void OQuake_STAR_Console_f(void) {
             Con_Printf("Usage: star pickup keycard <silver|gold>\n");
             return;
         }
+        if (!OQ_AllowPrivilegedCommands()) { Con_Printf("Only dellams or anorak can use star pickup keycard.\n"); return; }
         const char* color = Cmd_Argv(3);
         const char* name = NULL;
         const char* desc = NULL;
@@ -2198,8 +2240,13 @@ void OQuake_STAR_Console_f(void) {
         else if (strcmp(color, "gold") == 0) { name = OQUAKE_ITEM_GOLD_KEY; desc = get_key_description(name); }
         else { Con_Printf("Unknown keycard: %s. Use silver|gold.\n", color); return; }
         star_api_result_t r = star_api_add_item(name, desc, "Quake", "KeyItem");
-        if (r == STAR_API_SUCCESS) Con_Printf("Added %s to STAR inventory.\n", name);
-        else Con_Printf("Failed: %s\n", star_api_get_last_error());
+        if (r == STAR_API_SUCCESS) {
+            Con_Printf("Added %s to STAR inventory.\n", name);
+            q_strlcpy(g_star_last_pickup_name, name, sizeof(g_star_last_pickup_name));
+            q_strlcpy(g_star_last_pickup_desc, desc ? desc : "", sizeof(g_star_last_pickup_desc));
+            q_strlcpy(g_star_last_pickup_type, "KeyItem", sizeof(g_star_last_pickup_type));
+            g_star_has_last_pickup = true;
+        } else Con_Printf("Failed: %s\n", star_api_get_last_error());
         return;
     }
     if (strcmp(sub, "version") == 0) {
@@ -2236,13 +2283,19 @@ void OQuake_STAR_Console_f(void) {
         return;
     }
     if (strcmp(sub, "add") == 0) {
+        if (!OQ_AllowPrivilegedCommands()) { Con_Printf("Only dellams or anorak can use star add.\n"); return; }
         if (argc < 3) { Con_Printf("Usage: star add <item_name> [description] [item_type]\n"); return; }
         const char* name = Cmd_Argv(2);
         const char* desc = argc > 3 ? Cmd_Argv(3) : "Added from console";
         const char* type = argc > 4 ? Cmd_Argv(4) : "Miscellaneous";
         star_api_result_t r = star_api_add_item(name, desc, "Quake", type);
-        if (r == STAR_API_SUCCESS) Con_Printf("Added '%s' to STAR inventory.\n", name);
-        else Con_Printf("Failed to add '%s': %s\n", name, star_api_get_last_error());
+        if (r == STAR_API_SUCCESS) {
+            Con_Printf("Added '%s' to STAR inventory.\n", name);
+            q_strlcpy(g_star_last_pickup_name, name, sizeof(g_star_last_pickup_name));
+            q_strlcpy(g_star_last_pickup_desc, desc ? desc : "", sizeof(g_star_last_pickup_desc));
+            q_strlcpy(g_star_last_pickup_type, type ? type : "Miscellaneous", sizeof(g_star_last_pickup_type));
+            g_star_has_last_pickup = true;
+        } else Con_Printf("Failed to add '%s': %s\n", name, star_api_get_last_error());
         return;
     }
     if (strcmp(sub, "use") == 0) {
@@ -2251,6 +2304,77 @@ void OQuake_STAR_Console_f(void) {
         int ok = star_api_use_item(Cmd_Argv(2), ctx);
         Con_Printf("Use '%s' (context %s): %s\n", Cmd_Argv(2), ctx, ok ? "ok" : "failed");
         if (!ok) Con_Printf("  %s\n", star_api_get_last_error());
+        return;
+    }
+    if (strcmp(sub, "lastpickup") == 0) {
+        if (!g_star_has_last_pickup) {
+            Con_Printf("No pickup has been synced to STAR yet in this session.\n");
+            return;
+        }
+        Con_Printf("Last STAR-synced pickup:\n  name: %s\n  type: %s\n  desc: %s\n", g_star_last_pickup_name, g_star_last_pickup_type, g_star_last_pickup_desc);
+        return;
+    }
+    if (strcmp(sub, "quest") == 0) {
+        if (argc < 3) { Con_Printf("Usage: star quest start|objective|complete ...\n"); return; }
+        const char* qsub = Cmd_Argv(2);
+        if (strcmp(qsub, "start") == 0) {
+            if (argc < 4) { Con_Printf("Usage: star quest start <quest_id>\n"); return; }
+            star_api_result_t r = star_api_start_quest(Cmd_Argv(3));
+            Con_Printf(r == STAR_API_SUCCESS ? "Quest started.\n" : "Failed: %s\n", star_api_get_last_error());
+            return;
+        }
+        if (strcmp(qsub, "objective") == 0) {
+            if (argc < 5) { Con_Printf("Usage: star quest objective <quest_id> <objective_id>\n"); return; }
+            star_api_result_t r = star_api_complete_quest_objective(Cmd_Argv(3), Cmd_Argv(4), "Quake");
+            Con_Printf(r == STAR_API_SUCCESS ? "Objective completed.\n" : "Failed: %s\n", star_api_get_last_error());
+            return;
+        }
+        if (strcmp(qsub, "complete") == 0) {
+            if (argc < 4) { Con_Printf("Usage: star quest complete <quest_id>\n"); return; }
+            star_api_result_t r = star_api_complete_quest(Cmd_Argv(3));
+            Con_Printf(r == STAR_API_SUCCESS ? "Quest completed.\n" : "Failed: %s\n", star_api_get_last_error());
+            return;
+        }
+        Con_Printf("Unknown: star quest %s. Use start|objective|complete.\n", qsub);
+        return;
+    }
+    if (strcmp(sub, "bossnft") == 0) {
+        if (!OQ_AllowPrivilegedCommands()) { Con_Printf("Only dellams or anorak can use star bossnft.\n"); return; }
+        if (argc < 3) { Con_Printf("Usage: star bossnft <boss_name> [description]\n"); return; }
+        const char* name = Cmd_Argv(2);
+        const char* desc = argc > 3 ? Cmd_Argv(3) : "Boss from OQuake";
+        char nft_id[64] = {0};
+        star_api_result_t r = star_api_create_boss_nft(name, desc, "Quake", "{}", nft_id);
+        if (r == STAR_API_SUCCESS) Con_Printf("Boss NFT created. ID: %s\n", nft_id[0] ? nft_id : "(none)");
+        else Con_Printf("Failed: %s\n", star_api_get_last_error());
+        return;
+    }
+    if (strcmp(sub, "deploynft") == 0) {
+        if (argc < 4) { Con_Printf("Usage: star deploynft <nft_id> <target_game> [location]\n"); return; }
+        const char* loc = argc > 4 ? Cmd_Argv(4) : "";
+        star_api_result_t r = star_api_deploy_boss_nft(Cmd_Argv(2), Cmd_Argv(3), loc);
+        Con_Printf(r == STAR_API_SUCCESS ? "NFT deploy requested.\n" : "Failed: %s\n", star_api_get_last_error());
+        return;
+    }
+    if (strcmp(sub, "debug") == 0) {
+        if (argc < 3 || !Cmd_Argv(2) || strcmp(Cmd_Argv(2), "status") == 0) {
+            Con_Printf("STAR debug logging is %s\n", g_star_debug_logging ? "on" : "off");
+            Con_Printf("Usage: star debug on|off|status\n");
+            return;
+        }
+        if (strcmp(Cmd_Argv(2), "on") == 0) { g_star_debug_logging = true; Con_Printf("STAR debug logging enabled.\n"); return; }
+        if (strcmp(Cmd_Argv(2), "off") == 0) { g_star_debug_logging = false; Con_Printf("STAR debug logging disabled.\n"); return; }
+        Con_Printf("Unknown debug option: %s. Use on|off|status.\n", Cmd_Argv(2));
+        return;
+    }
+    if (strcmp(sub, "send_avatar") == 0) {
+        if (argc < 4) { Con_Printf("Usage: star send_avatar <username> <item_class>\n"); return; }
+        Con_Printf("Send to avatar: \"%s\" item \"%s\" (STAR send API not yet implemented).\n", Cmd_Argv(2), Cmd_Argv(3));
+        return;
+    }
+    if (strcmp(sub, "send_clan") == 0) {
+        if (argc < 4) { Con_Printf("Usage: star send_clan <clan_name> <item_class>\n"); return; }
+        Con_Printf("Send to clan: \"%s\" item \"%s\" (STAR send API not yet implemented).\n", Cmd_Argv(2), Cmd_Argv(3));
         return;
     }
     if (strcmp(sub, "beamin") == 0 || (strcmp(sub, "beamed") == 0 && argc >= 3 && strcmp(Cmd_Argv(2), "in") == 0)) {
@@ -2441,9 +2565,9 @@ void OQuake_STAR_Console_f(void) {
         Con_Printf("    stack_weapons:  %s\n", atoi(oquake_star_stack_weapons.string) ? "1 (stack)" : "0 (unlock)");
         Con_Printf("    stack_powerups: %s\n", atoi(oquake_star_stack_powerups.string) ? "1 (stack)" : "0 (unlock)");
         Con_Printf("    stack_keys:     %s\n", atoi(oquake_star_stack_keys.string) ? "1 (stack)" : "0 (unlock)");
-        Con_Printf("    stack_sigils:   %s\n", atoi(oquake_star_stack_sigils.string) ? "1 (stack)" : "0 (unlock)");
+        Con_Printf("    stack_sigils:   %s (OQuake only)\n", atoi(oquake_star_stack_sigils.string) ? "1 (stack)" : "0 (unlock)");
         Con_Printf("\n");
-        Con_Printf("To set: star stack <armor|weapons|powerups|keys|sigils> <0|1>\n");
+        Con_Printf("To set: star stack <armor|weapons|powerups|keys|sigils> <0|1> (sigils = OQuake only)\n");
         Con_Printf("URLs: star seturl <url>   star setoasisurl <url>\n");
         Con_Printf("Config file: star configfile json|cfg\n");
         Con_Printf("To save now: star config save (also saved on exit)\n");
@@ -2627,18 +2751,29 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
 
     if (g_inventory_send_popup != OQ_SEND_POPUP_NONE) {
         int popup_w = q_min(panel_w - 80, 420);
-        int popup_h = 96;
+        int popup_h = 108;
         int popup_x = panel_x + (panel_w - popup_w) / 2;
         int popup_y = panel_y + (panel_h - popup_h) / 2;
         const char* title = g_inventory_send_popup == OQ_SEND_POPUP_CLAN ? "SEND TO CLAN" : "SEND TO AVATAR";
         const char* label = g_inventory_send_popup == OQ_SEND_POPUP_CLAN ? "Clan" : "Username";
         int mode = OQ_GROUP_MODE_COUNT;
         int available = 1;
+        char send_item_label[OQ_GROUP_LABEL_MAX];
 
         Draw_Fill(cbx, popup_x, popup_y, popup_w, popup_h, 0, 0.9f);
         Draw_String(cbx, popup_x + 8, popup_y + 8, title);
+        /* Show which item we are sending above the name box */
+        send_item_label[0] = '\0';
+        if (OQ_GetSelectedItem()) {
+            OQ_GetGroupedDisplayInfo(OQ_GetSelectedItem(), send_item_label, sizeof(send_item_label), &mode, &available);
+            if (mode != OQ_GROUP_MODE_COUNT && available > 1)
+                q_snprintf(line, sizeof(line), "Sending: %s x%d", send_item_label, g_inventory_send_quantity);
+            else
+                q_snprintf(line, sizeof(line), "Sending: %s", send_item_label);
+            Draw_String(cbx, popup_x + 8, popup_y + 18, line);
+        }
         q_snprintf(line, sizeof(line), "%s: %s%s", label, g_inventory_send_target, ((int)(realtime * 2) & 1) ? "_" : "");
-        Draw_String(cbx, popup_x + 8, popup_y + 24, line);
+        Draw_String(cbx, popup_x + 8, popup_y + 30, line);
         OQ_GetSelectedGroupInfo(NULL, &mode, &available, NULL, 0);
         if (mode != OQ_GROUP_MODE_COUNT)
             available = 1;
@@ -2649,16 +2784,16 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
         if (g_inventory_send_quantity > available)
             g_inventory_send_quantity = available;
         q_snprintf(line, sizeof(line), "Quantity: %d / %d (Up/Down)", g_inventory_send_quantity, available);
-        Draw_String(cbx, popup_x + 8, popup_y + 36, line);
-        Draw_String(cbx, popup_x + 8, popup_y + 48, "Left=Send  Right=Cancel");
+        Draw_String(cbx, popup_x + 8, popup_y + 42, line);
+        Draw_String(cbx, popup_x + 8, popup_y + 54, "Left=Send  Right=Cancel");
 
         if (g_inventory_send_button == 0)
-            Draw_Fill(cbx, popup_x + 8, popup_y + 72, 64, 10, 224, 0.65f);
-        Draw_String(cbx, popup_x + 16, popup_y + 73, "SEND");
+            Draw_Fill(cbx, popup_x + 8, popup_y + 78, 64, 10, 224, 0.65f);
+        Draw_String(cbx, popup_x + 16, popup_y + 79, "SEND");
 
         if (g_inventory_send_button == 1)
-            Draw_Fill(cbx, popup_x + 84, popup_y + 72, 72, 10, 224, 0.65f);
-        Draw_String(cbx, popup_x + 92, popup_y + 73, "CANCEL");
+            Draw_Fill(cbx, popup_x + 84, popup_y + 78, 72, 10, 224, 0.65f);
+        Draw_String(cbx, popup_x + 92, popup_y + 79, "CANCEL");
     }
 }
 
