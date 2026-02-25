@@ -127,6 +127,9 @@ static char g_inventory_saved_all_binds[MAX_KEYS][128];
 static int star_initialized(void);
 static int OQ_ItemMatchesTab(const oquake_inventory_entry_t* item, int tab);
 static void OQ_RefreshInventoryCache(void);
+static void OQ_StartInventorySyncIfNeeded(void);
+static void OQ_RefreshOverlayFromClient(void);
+static void OQ_AppendLocalToDisplay(void);
 static void OQ_ClampSelection(int filtered_count);
 static void OQ_ApplyBeamFacePreference(void);
 static void OQ_CheckAndSyncLocalItem(int index);
@@ -136,57 +139,38 @@ enum {
     OQ_GROUP_MODE_SUM = 1
 };
 
+/* Queue only: add to local list for display; sync starts in background straight away (OQ_StartInventorySyncIfNeeded) or when overlay opens. Client does has_item/add_item; minimal API - same pattern as ODOOM. */
 static int OQ_AddInventoryUnlockIfMissing(const char* item_name, const char* description, const char* item_type)
 {
     int i;
     int local_added = 0;
-    int remote_added = 0;
-    star_api_result_t result;
 
     if (!item_name || !item_name[0])
         return 0;
 
     for (i = 0; i < g_local_inventory_count; i++) {
         if (!strcmp(g_local_inventory_entries[i].name, item_name))
-            break;
+            return 0; /* Already in local list */
     }
-    if (i == g_local_inventory_count && g_local_inventory_count < OQ_MAX_INVENTORY_ITEMS) {
+    if (g_local_inventory_count < OQ_MAX_INVENTORY_ITEMS) {
         oquake_inventory_entry_t* dst = &g_local_inventory_entries[g_local_inventory_count++];
         q_strlcpy(dst->name, item_name, sizeof(dst->name));
         q_strlcpy(dst->description, description ? description : "", sizeof(dst->description));
         q_strlcpy(dst->item_type, item_type ? item_type : "Item", sizeof(dst->item_type));
         dst->id[0] = '\0';
         q_strlcpy(dst->game_source, "Quake", sizeof(dst->game_source));
-        g_local_inventory_synced[i] = false;
+        g_local_inventory_synced[g_local_inventory_count - 1] = false;
         local_added = 1;
     }
 
-    if (g_star_initialized) {
-        /* Check if item already exists in remote inventory */
-        if (star_api_has_item(item_name)) {
-            /* Item already exists in remote - mark as synced */
-            if (i < g_local_inventory_count)
-                g_local_inventory_synced[i] = true;
-        } else {
-            /* Item doesn't exist in remote - try to add it */
-            result = star_api_add_item(item_name, description, "Quake", item_type);
-            if (result == STAR_API_SUCCESS) {
-                if (i < g_local_inventory_count)
-                    g_local_inventory_synced[i] = true;
-                remote_added = 1;
-            }
-        }
-    }
-
-    return local_added || remote_added;
+    return local_added;
 }
 
+/* Queue only: add to local list; sync starts in background straight away (OQ_StartInventorySyncIfNeeded) or when overlay opens. Same pattern as ODOOM. */
 static int OQ_AddInventoryEvent(const char* item_prefix, const char* description, const char* item_type)
 {
     char item_name[128];
     int local_added = 0;
-    int remote_added = 0;
-    star_api_result_t result;
     if (!item_prefix || !item_prefix[0])
         return 0;
     g_inventory_event_seq++;
@@ -204,16 +188,7 @@ static int OQ_AddInventoryEvent(const char* item_prefix, const char* description
         local_added = 1;
     }
 
-    if (g_star_initialized) {
-        result = star_api_add_item(item_name, description, "Quake", item_type);
-        if (result == STAR_API_SUCCESS) {
-            if (g_local_inventory_count > 0)
-                g_local_inventory_synced[g_local_inventory_count - 1] = true;
-            remote_added = 1;
-        }
-    }
-
-    return local_added || remote_added;
+    return local_added;
 }
 
 static qboolean OQ_KeyPressed(int key)
@@ -611,9 +586,10 @@ static void OQ_UseSelectedItem(void)
         return;
     }
 
-    if (star_api_use_item(item->name, "inventory_overlay")) {
+    star_api_queue_use_item(item->name, "inventory_overlay");
+    if (star_api_flush_use_item_jobs() == STAR_API_SUCCESS) {
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Used item: %s", item->name);
-        OQ_RefreshInventoryCache();
+        OQ_RefreshOverlayFromClient();
     } else {
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Use failed: %s", star_api_get_last_error());
     }
@@ -761,6 +737,7 @@ static void OQ_OnAuthDone(void* user_data) {
                 q_strlcpy(d->description, s->description, sizeof(d->description));
                 q_strlcpy(d->game_source, "Quake", sizeof(d->game_source));
                 q_strlcpy(d->item_type, s->item_type, sizeof(d->item_type));
+                d->nft_id[0] = '\0';
                 d->synced = g_local_inventory_synced[l] ? 1 : 0;
             }
             star_sync_inventory_start(g_star_sync_local_items, g_local_inventory_count, "Quake", OQ_OnInventoryDone, NULL);
@@ -780,11 +757,11 @@ static void OQ_OnSendItemDone(void* user_data) {
     if (success) {
         q_strlcpy(g_inventory_status, "Item sent.", sizeof(g_inventory_status));
         Con_Printf("OQuake: Item sent.\n");
+        OQ_RefreshOverlayFromClient(); /* Client updated cache; one get_inventory to refresh overlay. */
     } else {
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Send failed: %s", err_buf[0] ? err_buf : "Unknown error");
         Con_Printf("OQuake: Send failed: %s\n", err_buf[0] ? err_buf : "Unknown error");
     }
-    OQ_RefreshInventoryCache();
 }
 
 static void OQ_ProcessInventoryResult(star_item_list_t* list, star_api_result_t result, const char* api_error);
@@ -800,6 +777,7 @@ static void OQ_OnInventoryDone(void* user_data) {
     OQ_ProcessInventoryResult(list, result, api_error_buf[0] ? api_error_buf : NULL);
     if (list)
         star_api_free_item_list(list);
+    star_sync_inventory_clear_result();
 }
 
 static void OQ_CheckAuthenticationComplete(void) {
@@ -858,11 +836,9 @@ static void OQ_ProcessInventoryResult(star_item_list_t* list, star_api_result_t 
                         }
                     }
                 }
-                if (found_in_remote) {
+                if (found_in_remote)
                     g_local_inventory_synced[l] = true;
-                } else if (g_star_initialized && star_api_has_item(g_local_inventory_entries[l].name)) {
-                    g_local_inventory_synced[l] = true;
-                }
+                /* Sync layer already did has_item/add_item; no extra star_api_has_item here. */
             }
         }
     }
@@ -966,6 +942,42 @@ static void OQ_CheckInventoryRefreshComplete(void) {
     star_sync_pump();
 }
 
+/** Refresh overlay from client cache only (one get_inventory; client returns cache). Minimal API - same pattern as ODOOM. Call after send/use so overlay stays in sync. */
+static void OQ_RefreshOverlayFromClient(void) {
+    star_item_list_t* list = NULL;
+    if (star_api_get_inventory(&list) != STAR_API_SUCCESS || !list) {
+        if (!star_initialized())
+            q_strlcpy(g_inventory_status, "Offline - use STAR BEAMIN", sizeof(g_inventory_status));
+        return;
+    }
+    g_inventory_count = 0;
+    size_t i;
+    for (i = 0; i < list->count && g_inventory_count < OQ_MAX_INVENTORY_ITEMS; i++) {
+        oquake_inventory_entry_t* dst = &g_inventory_entries[g_inventory_count];
+        q_strlcpy(dst->name, list->items[i].name, sizeof(dst->name));
+        q_strlcpy(dst->description, list->items[i].description, sizeof(dst->description));
+        q_strlcpy(dst->item_type, list->items[i].item_type, sizeof(dst->item_type));
+        q_strlcpy(dst->id, list->items[i].id, sizeof(dst->id));
+        q_strlcpy(dst->game_source, list->items[i].game_source, sizeof(dst->game_source));
+        g_inventory_count++;
+        /* Mark matching local items as synced */
+        {
+            int l;
+            for (l = 0; l < g_local_inventory_count; l++) {
+                if (!strcmp(g_local_inventory_entries[l].name, list->items[i].name))
+                    g_local_inventory_synced[l] = true;
+            }
+        }
+    }
+    star_api_free_item_list(list);
+    OQ_AppendLocalToDisplay();
+    g_inventory_last_refresh = realtime;
+    if (g_inventory_count == 0)
+        q_strlcpy(g_inventory_status, "STAR inventory is empty.", sizeof(g_inventory_status));
+    else
+        q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Synced (%d items)", g_inventory_count);
+}
+
 /** Append any local items not already in g_inventory_entries so pickups show immediately. */
 static void OQ_AppendLocalToDisplay(void) {
     int i, j;
@@ -989,10 +1001,36 @@ static void OQ_AppendLocalToDisplay(void) {
     }
 }
 
+/** If there are pending (unsynced) local items and no sync in progress, start inventory sync on a background thread. Call after pickups and from OQ_RefreshInventoryCache. */
+static void OQ_StartInventorySyncIfNeeded(void) {
+    if (star_sync_inventory_in_progress() || star_sync_auth_in_progress() || !star_initialized())
+        return;
+    {
+        int pending = 0;
+        int l;
+        for (l = 0; l < g_local_inventory_count; l++) {
+            if (!g_local_inventory_synced[l]) { pending = 1; break; }
+        }
+        if (!pending || g_local_inventory_count <= 0)
+            return;
+        q_strlcpy(g_inventory_status, "Syncing...", sizeof(g_inventory_status));
+        for (l = 0; l < g_local_inventory_count; l++) {
+            star_sync_local_item_t* d = &g_star_sync_local_items[l];
+            oquake_inventory_entry_t* s = &g_local_inventory_entries[l];
+            q_strlcpy(d->name, s->name, sizeof(d->name));
+            q_strlcpy(d->description, s->description, sizeof(d->description));
+            q_strlcpy(d->game_source, "Quake", sizeof(d->game_source));
+            q_strlcpy(d->item_type, s->item_type, sizeof(d->item_type));
+            d->nft_id[0] = '\0';
+            d->synced = g_local_inventory_synced[l] ? 1 : 0;
+        }
+        star_sync_inventory_start(g_star_sync_local_items, g_local_inventory_count, "Quake", OQ_OnInventoryDone, NULL);
+    }
+}
+
+/** Start background inventory sync only when we have pending (unsynced) local items; otherwise refresh from client cache. Same pattern as ODOOM - minimal API calls. */
 static void OQ_RefreshInventoryCache(void) {
     if (star_sync_inventory_in_progress())
-        return;
-    if (realtime - g_inventory_last_refresh < 1.0)
         return;
     if (star_sync_auth_in_progress()) {
         q_strlcpy(g_inventory_status, "Authenticating...", sizeof(g_inventory_status));
@@ -1003,21 +1041,11 @@ static void OQ_RefreshInventoryCache(void) {
         q_strlcpy(g_inventory_status, "Offline - use STAR BEAMIN", sizeof(g_inventory_status));
         return;
     }
-    q_strlcpy(g_inventory_status, "Syncing...", sizeof(g_inventory_status));
-    /* Build sync layer local items from g_local_inventory_entries */
-    {
-        int l;
-        for (l = 0; l < g_local_inventory_count; l++) {
-            star_sync_local_item_t* d = &g_star_sync_local_items[l];
-            oquake_inventory_entry_t* s = &g_local_inventory_entries[l];
-            q_strlcpy(d->name, s->name, sizeof(d->name));
-            q_strlcpy(d->description, s->description, sizeof(d->description));
-            q_strlcpy(d->game_source, "Quake", sizeof(d->game_source));
-            q_strlcpy(d->item_type, s->item_type, sizeof(d->item_type));
-            d->synced = g_local_inventory_synced[l] ? 1 : 0;
-        }
-    }
-    star_sync_inventory_start(g_star_sync_local_items, g_local_inventory_count, "Quake", OQ_OnInventoryDone, NULL);
+    OQ_StartInventorySyncIfNeeded();
+    if (star_sync_inventory_in_progress())
+        return;
+    /* No pending items: refresh overlay from client cache only (one get_inventory). */
+    OQ_RefreshOverlayFromClient();
 }
 
 static void OQ_InventoryToggle_f(void) {
@@ -2013,21 +2041,16 @@ void OQuake_STAR_OnKeyPickup(const char* key_name) {
     if (OQ_StackKeys()) {
         const char* event_name = !strcmp(key_name, OQUAKE_ITEM_SILVER_KEY) ? "quake_pickup_key_silver" : "quake_pickup_key_gold";
         if (OQ_AddInventoryEvent(event_name, desc, "KeyItem")) {
-            printf("OQuake STAR API: Added %s to cross-game inventory.\n", key_name);
+            printf("OQuake STAR API: Queued %s for sync.\n", key_name);
             q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Collected: %s", key_name);
-            OQ_RefreshInventoryCache();
-        } else {
-            printf("OQuake STAR API: Failed to add %s: %s\n", key_name, star_api_get_last_error());
         }
     } else {
         if (OQ_AddInventoryUnlockIfMissing(key_name, desc, "KeyItem")) {
-            printf("OQuake STAR API: Added %s to cross-game inventory.\n", key_name);
+            printf("OQuake STAR API: Queued %s for sync.\n", key_name);
             q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Collected: %s", key_name);
-            OQ_RefreshInventoryCache();
-        } else {
-            printf("OQuake STAR API: Failed to add %s: %s\n", key_name, star_api_get_last_error());
         }
     }
+    OQ_StartInventorySyncIfNeeded();
 }
 
 void OQuake_STAR_OnItemsChangedEx(unsigned int old_items, unsigned int new_items, int in_real_game)
@@ -2069,8 +2092,8 @@ void OQuake_STAR_OnItemsChangedEx(unsigned int old_items, unsigned int new_items
 
     if (added > 0) {
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d new pickup(s)", added);
-        OQ_AppendLocalToDisplay(); /* show new items immediately */
-        OQ_RefreshInventoryCache();
+        OQ_AppendLocalToDisplay();
+        OQ_StartInventorySyncIfNeeded();
     }
 }
 
@@ -2109,8 +2132,8 @@ void OQuake_STAR_OnStatsChangedEx(
     }
     if (added > 0) {
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d pickup event(s)", added);
-        OQ_AppendLocalToDisplay(); /* show new items immediately */
-        OQ_RefreshInventoryCache();
+        OQ_AppendLocalToDisplay();
+        OQ_StartInventorySyncIfNeeded();
     }
 }
 
@@ -2136,6 +2159,9 @@ void OQuake_STAR_PollItems(void) {
     static int poll_prev_shells = -1, poll_prev_nails = -1, poll_prev_rockets = -1, poll_prev_cells = -1;
     static int poll_prev_health = -1, poll_prev_armor = -1;
     static int poll_prev_valid = 0;
+
+    /* Run async completions (auth, inventory, use_item) every frame so e.g. "star beamin" finishes even when console is open. */
+    star_sync_pump();
 
     if (!sv.active || cls.demoplayback) {
         poll_prev_items = (unsigned int)cl.items;
@@ -2168,12 +2194,24 @@ void OQuake_STAR_PollItems(void) {
     poll_prev_valid = 1;
 }
 
+/** Called from main thread by star_sync_pump() when use-item (door key) completes. */
+static void OQ_OnUseItemDone(void* user_data) {
+    int success = 0;
+    char err_buf[384] = {0};
+    (void)user_data;
+    if (!star_sync_use_item_get_result(&success, err_buf, sizeof(err_buf)))
+        return;
+    if (success)
+        OQ_RefreshOverlayFromClient();
+}
+
 int OQuake_STAR_CheckDoorAccess(const char* door_targetname, const char* required_key_name) {
     if (!g_star_initialized || !required_key_name)
         return 0;
+    /* star_api_has_item uses client cache first, then API if needed. */
     if (star_api_has_item(required_key_name)) {
         printf("OQuake STAR API: Door opened with cross-game key: %s\n", required_key_name);
-        star_api_use_item(required_key_name, door_targetname ? door_targetname : "quake_door");
+        star_sync_use_item_start(required_key_name, door_targetname ? door_targetname : "quake_door", OQ_OnUseItemDone, NULL);
         return 1;
     }
     return 0;
@@ -2261,7 +2299,8 @@ void OQuake_STAR_Console_f(void) {
         if (strcmp(color, "silver") == 0) { name = OQUAKE_ITEM_SILVER_KEY; desc = get_key_description(name); }
         else if (strcmp(color, "gold") == 0) { name = OQUAKE_ITEM_GOLD_KEY; desc = get_key_description(name); }
         else { Con_Printf("Unknown keycard: %s. Use silver|gold.\n", color); return; }
-        star_api_result_t r = star_api_add_item(name, desc, "Quake", "KeyItem");
+        star_api_queue_add_item(name, desc, "Quake", "KeyItem", NULL);
+        star_api_result_t r = star_api_flush_add_item_jobs();
         if (r == STAR_API_SUCCESS) {
             Con_Printf("Added %s to STAR inventory.\n", name);
             q_strlcpy(g_star_last_pickup_name, name, sizeof(g_star_last_pickup_name));
@@ -2285,32 +2324,20 @@ void OQuake_STAR_Console_f(void) {
     if (strcmp(sub, "inventory") == 0) {
         if (!star_initialized()) { Con_Printf("STAR API not initialized. %s\n", star_api_get_last_error()); return; }
         if (star_sync_inventory_in_progress()) {
-            Con_Printf("Inventory sync in progress. Open the inventory popup or run 'star inventory' again in a moment.\n");
+            Con_Printf("Inventory sync in progress. Run 'star inventory' again in a moment.\n");
             return;
         }
+        /* Refresh from client cache (one get_inventory); then print. */
+        OQ_RefreshOverlayFromClient();
         if (g_inventory_count > 0) {
             size_t i;
             Con_Printf("STAR inventory (%d items):\n", g_inventory_count);
             for (i = 0; i < (size_t)g_inventory_count; i++) {
                 Con_Printf("  %s - %s (%s, %s)\n", g_inventory_entries[i].name, g_inventory_entries[i].description, g_inventory_entries[i].game_source, g_inventory_entries[i].item_type);
             }
-            return;
+        } else {
+            Con_Printf("STAR inventory is empty.\n");
         }
-        /* Start async fetch; result will fill cache and popup. */
-        {
-            int l;
-            for (l = 0; l < g_local_inventory_count; l++) {
-                star_sync_local_item_t* d = &g_star_sync_local_items[l];
-                oquake_inventory_entry_t* s = &g_local_inventory_entries[l];
-                q_strlcpy(d->name, s->name, sizeof(d->name));
-                q_strlcpy(d->description, s->description, sizeof(d->description));
-                q_strlcpy(d->game_source, "Quake", sizeof(d->game_source));
-                q_strlcpy(d->item_type, s->item_type, sizeof(d->item_type));
-                d->synced = g_local_inventory_synced[l] ? 1 : 0;
-            }
-            star_sync_inventory_start(g_star_sync_local_items, g_local_inventory_count, "Quake", OQ_OnInventoryDone, NULL);
-        }
-        Con_Printf("Fetching inventory in background. Open the inventory popup or run 'star inventory' again in a moment.\n");
         return;
     }
     if (strcmp(sub, "has") == 0) {
@@ -2325,7 +2352,8 @@ void OQuake_STAR_Console_f(void) {
         const char* name = Cmd_Argv(2);
         const char* desc = argc > 3 ? Cmd_Argv(3) : "Added from console";
         const char* type = argc > 4 ? Cmd_Argv(4) : "Miscellaneous";
-        star_api_result_t r = star_api_add_item(name, desc, "Quake", type);
+        star_api_queue_add_item(name, desc, "Quake", type, NULL);
+        star_api_result_t r = star_api_flush_add_item_jobs();
         if (r == STAR_API_SUCCESS) {
             Con_Printf("Added '%s' to STAR inventory.\n", name);
             q_strlcpy(g_star_last_pickup_name, name, sizeof(g_star_last_pickup_name));
@@ -2338,7 +2366,9 @@ void OQuake_STAR_Console_f(void) {
     if (strcmp(sub, "use") == 0) {
         if (argc < 3) { Con_Printf("Usage: star use <item_name> [context]\n"); return; }
         const char* ctx = argc > 3 ? Cmd_Argv(3) : "console";
-        int ok = star_api_use_item(Cmd_Argv(2), ctx);
+        star_api_queue_use_item(Cmd_Argv(2), ctx);
+        int r = star_api_flush_use_item_jobs();
+        int ok = (r == STAR_API_SUCCESS);
         Con_Printf("Use '%s' (context %s): %s\n", Cmd_Argv(2), ctx, ok ? "ok" : "failed");
         if (!ok) Con_Printf("  %s\n", star_api_get_last_error());
         return;
@@ -2724,8 +2754,7 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
     if (!g_inventory_open || !cbx)
         return;
 
-    if (realtime - g_inventory_last_refresh > 2.0)
-        OQ_RefreshInventoryCache();
+    /* Inventory only loads after beam-in and refreshes once when opened; no periodic 2s refresh. */
 
     panel_w = q_min(glwidth - 48, 900);
     panel_h = q_min(glheight - 96, 480);  /* Increased height to prevent text overlap */
