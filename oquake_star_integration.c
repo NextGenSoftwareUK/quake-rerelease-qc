@@ -1013,6 +1013,7 @@ static void OQ_StartInventorySyncIfNeeded(void) {
         }
         if (!pending || g_local_inventory_count <= 0)
             return;
+        Con_Printf("OQuake: starting inventory sync (%d local items to push).\n", g_local_inventory_count);
         q_strlcpy(g_inventory_status, "Syncing...", sizeof(g_inventory_status));
         for (l = 0; l < g_local_inventory_count; l++) {
             star_sync_local_item_t* d = &g_star_sync_local_items[l];
@@ -1041,11 +1042,10 @@ static void OQ_RefreshInventoryCache(void) {
         q_strlcpy(g_inventory_status, "Offline - use STAR BEAMIN", sizeof(g_inventory_status));
         return;
     }
-    OQ_StartInventorySyncIfNeeded();
-    if (star_sync_inventory_in_progress())
-        return;
-    /* No pending items: refresh overlay from client cache only (one get_inventory). */
+    /* Always refresh overlay first (server cache + local pickups) so opening the popup shows current qty including just-picked items. */
     OQ_RefreshOverlayFromClient();
+    /* Then start sync if we have unsynced local items. */
+    OQ_StartInventorySyncIfNeeded();
 }
 
 static void OQ_InventoryToggle_f(void) {
@@ -1578,6 +1578,12 @@ void OQuake_STAR_Init(void) {
         Cmd_AddCommand("oasis_inventory_nexttab", OQ_InventoryNextTab_f);
         Cmd_AddCommand("oasis_reload_config", OQ_ReloadConfig_f);
         g_star_console_registered = 1;
+        /* Default: I key opens OASIS inventory if not already bound */
+        {
+            int kn = Key_StringToKeynum("i");
+            if (kn >= 0 && (!keybindings[kn] || !keybindings[kn][0]))
+                Key_SetBinding(kn, "oasis_inventory_toggle");
+        }
     }
 
     /* Try to auto-load config from config.cfg or oasisstar.json */
@@ -2131,6 +2137,7 @@ void OQuake_STAR_OnStatsChangedEx(
         added += OQ_AddInventoryEvent("quake_pickup_cells", desc, "Ammo");
     }
     if (added > 0) {
+        Con_Printf("OQuake: %d pickup event(s) recorded (shells/nails/rockets/cells), starting sync.\n", added);
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d pickup event(s)", added);
         OQ_AppendLocalToDisplay();
         OQ_StartInventorySyncIfNeeded();
