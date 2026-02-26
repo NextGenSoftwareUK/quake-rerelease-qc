@@ -297,17 +297,21 @@ static void OQ_GetGroupedDisplayInfo(const oquake_inventory_entry_t* item, char*
         q_strlcpy(label, name, label_size);
     }
 
-    /* Stackable types: always use quantity from DB/API when present; only use parsed/local for display when no quantity. */
+    /* Stackable types: API row uses quantity (one item per type from backend). Local row uses delta from description (+25, +20). */
     if (!strcmp(label, "Shells") || !strcmp(label, "Nails") || !strcmp(label, "Rockets") || !strcmp(label, "Cells") ||
         !strcmp(label, "Green Armor") || !strcmp(label, "Yellow Armor") || !strcmp(label, "Red Armor") || !strcmp(label, "Health") ||
         !strcmp(label, "Silver Key") || !strcmp(label, "Gold Key")) {
         *mode = OQ_GROUP_MODE_SUM;
-        *value = (item && item->quantity > 0) ? item->quantity : (OQ_ParsePickupDelta(desc) > 0 ? OQ_ParsePickupDelta(desc) : 1);
+        if (item && item->id[0] != '\0' && item->quantity > 0)
+            *value = item->quantity;  /* from API: one item per type, one qty */
+        else
+            *value = (OQ_ParsePickupDelta(desc) > 0 ? OQ_ParsePickupDelta(desc) : 1);  /* local: use delta from "Shells pickup +25" */
     }
 
     OQ_AppendGameSourceTag(item, label, label_size);
 }
 
+/* One row per type (Shells, Green Armor, ...). Qty = API qty + sum of unsynced local deltas. Same model as backend. */
 static int OQ_BuildGroupedRows(
     int* out_rep_indices, char out_labels[][OQ_GROUP_LABEL_MAX], int* out_modes, int* out_values, qboolean* out_pending, int max_rows)
 {
@@ -315,14 +319,13 @@ static int OQ_BuildGroupedRows(
     int filtered_count;
     int group_count = 0;
     int i;
-    /* Use max per row, not sum: avoid double-count when API returns duplicate rows (e.g. two "Shells" entries 25 and 20 showing as 45). */
-    int row_api_max[OQ_MAX_INVENTORY_ITEMS];
-    int row_local_max[OQ_MAX_INVENTORY_ITEMS];
+    int row_api_qty[OQ_MAX_INVENTORY_ITEMS];   /* one API qty per type (backend has one item per type) */
+    int row_local_sum[OQ_MAX_INVENTORY_ITEMS]; /* sum of unsynced local deltas for that type */
 
     filtered_count = OQ_BuildFilteredIndices(filtered_indices, OQ_MAX_INVENTORY_ITEMS);
     for (i = 0; i < max_rows; i++) {
-        row_api_max[i] = 0;
-        row_local_max[i] = 0;
+        row_api_qty[i] = 0;
+        row_local_sum[i] = 0;
     }
     for (i = 0; i < filtered_count; i++) {
         int item_idx = filtered_indices[i];
@@ -346,20 +349,31 @@ static int OQ_BuildGroupedRows(
             q_strlcpy(out_labels[group_count], label, OQ_GROUP_LABEL_MAX);
             group_count++;
         }
-        if (ent->id[0] != '\0') {
-            if (value > row_api_max[row])
-                row_api_max[row] = value;
-        } else {
-            if (value > row_local_max[row])
-                row_local_max[row] = value;
-        }
-        out_values[row] = (row_api_max[row] > row_local_max[row]) ? row_api_max[row] : row_local_max[row];
+        /* API row (id set) = one item per type from backend; use its quantity. Local rows = pending pickups; add their delta. */
+        if (ent->id[0] != '\0')
+            row_api_qty[row] = value;  /* backend has one item per type; one API row per type */
+        else
+            row_local_sum[row] += value; /* sum of unsynced local deltas (+25, +20, ...) */
+        out_values[row] = row_api_qty[row] + row_local_sum[row];
         if (out_values[row] < 1)
             out_values[row] = 1;
+        /* Mark row pending if any unsynced local entry has the same type (base name) as this row. */
         if (out_pending[row] == false) {
             int j;
             for (j = 0; j < g_local_inventory_count; j++) {
-                if (!strcmp(g_local_inventory_entries[j].name, g_inventory_entries[item_idx].name) && !g_local_inventory_synced[j]) {
+                const char* nm = g_local_inventory_entries[j].name;
+                size_t nlen = strlen(nm);
+                if (g_local_inventory_synced[j])
+                    continue;
+                if (nlen >= 8 && nm[nlen - 7] == '_') {
+                    int k;
+                    for (k = 0; k < 6; k++)
+                        if (nm[nlen - 6 + k] < '0' || nm[nlen - 6 + k] > '9') break;
+                    if (k == 6 && (size_t)(nlen - 7) == strlen(out_labels[row]) && !strncmp(nm, out_labels[row], nlen - 7)) {
+                        out_pending[row] = true;
+                        break;
+                    }
+                } else if (!strcmp(nm, out_labels[row])) {
                     out_pending[row] = true;
                     break;
                 }
