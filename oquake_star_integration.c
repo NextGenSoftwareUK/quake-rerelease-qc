@@ -315,13 +315,14 @@ static int OQ_BuildGroupedRows(
     int filtered_count;
     int group_count = 0;
     int i;
-    int row_api_sum[OQ_MAX_INVENTORY_ITEMS];
-    int row_local_sum[OQ_MAX_INVENTORY_ITEMS];
+    /* Use max per row, not sum: avoid double-count when API returns duplicate rows (e.g. two "Shells" entries 25 and 20 showing as 45). */
+    int row_api_max[OQ_MAX_INVENTORY_ITEMS];
+    int row_local_max[OQ_MAX_INVENTORY_ITEMS];
 
     filtered_count = OQ_BuildFilteredIndices(filtered_indices, OQ_MAX_INVENTORY_ITEMS);
     for (i = 0; i < max_rows; i++) {
-        row_api_sum[i] = 0;
-        row_local_sum[i] = 0;
+        row_api_max[i] = 0;
+        row_local_max[i] = 0;
     }
     for (i = 0; i < filtered_count; i++) {
         int item_idx = filtered_indices[i];
@@ -345,12 +346,14 @@ static int OQ_BuildGroupedRows(
             q_strlcpy(out_labels[group_count], label, OQ_GROUP_LABEL_MAX);
             group_count++;
         }
-        /* Track API vs local so we show max (avoid double-count when both API and local have same label). */
-        if (ent->id[0] != '\0')
-            row_api_sum[row] += value;
-        else
-            row_local_sum[row] += value;
-        out_values[row] = (row_api_sum[row] > row_local_sum[row]) ? row_api_sum[row] : row_local_sum[row];
+        if (ent->id[0] != '\0') {
+            if (value > row_api_max[row])
+                row_api_max[row] = value;
+        } else {
+            if (value > row_local_max[row])
+                row_local_max[row] = value;
+        }
+        out_values[row] = (row_api_max[row] > row_local_max[row]) ? row_api_max[row] : row_local_max[row];
         if (out_values[row] < 1)
             out_values[row] = 1;
         if (out_pending[row] == false) {
@@ -726,6 +729,8 @@ static void OQ_OnInventoryDone(void* user_data) {
     if (list)
         star_api_free_item_list(list);
     star_sync_inventory_clear_result();
+    /* Refresh overlay from client so popup shows updated list without needing to close/reopen (sync invalidated cache; get_inventory will return fresh data). */
+    OQ_RefreshOverlayFromClient();
 }
 
 static void OQ_CheckAuthenticationComplete(void) {
@@ -2084,8 +2089,6 @@ void OQuake_STAR_OnStatsChangedEx(
     char desc[96];
     (void)old_health;
     (void)new_health;
-    (void)old_armor;
-    (void)new_armor;
     if (!in_real_game || !g_star_initialized)
         return;
     if (new_shells > old_shells) {
@@ -2104,11 +2107,19 @@ void OQuake_STAR_OnStatsChangedEx(
         q_snprintf(desc, sizeof(desc), "Cells pickup +%d", new_cells - old_cells);
         added += OQ_AddInventoryEvent("Cells", desc, "Ammo");
     }
+    if (new_armor > old_armor) {
+        int delta = new_armor - old_armor;
+        const char* armor_name = (delta <= 100) ? "Green Armor" : (delta < 200) ? "Yellow Armor" : "Red Armor";
+        q_snprintf(desc, sizeof(desc), "Armor pickup +%d", delta);
+        added += OQ_AddInventoryEvent(armor_name, desc, "Armor");
+    }
     if (added > 0) {
-        Con_Printf("OQuake: %d pickup event(s) recorded (shells/nails/rockets/cells), starting sync.\n", added);
+        Con_Printf("OQuake: %d pickup event(s) recorded, starting sync.\n", added);
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d pickup event(s)", added);
         OQ_AppendLocalToDisplay();
-        /* Display already has new items from AppendLocalToDisplay; overlay reads g_inventory_entries each frame so it will update. Do not call get_inventory here or it can overwrite with stale cache before sync completes. */
+        /* If popup is open, refresh the display list so the overlay shows the new item without close/reopen (overlay may not redraw every frame in some builds). */
+        if (g_inventory_open)
+            OQ_RefreshOverlayFromClient();
         OQ_StartInventorySyncIfNeeded();
     }
 }
