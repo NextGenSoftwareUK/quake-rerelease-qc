@@ -723,12 +723,13 @@ static void* inventory_thread_proc(void* param) {
                     memcpy(base_name, n, base_len);
                     base_name[base_len] = '\0';
                     const char* nft = (local[i].nft_id[0] != '\0') ? local[i].nft_id : NULL;
+                    int qty = (local[i].quantity > 0) ? local[i].quantity : 1;
                     star_api_queue_add_item(
                         base_name,
                         local[i].description,
                         local[i].game_source[0] ? local[i].game_source : default_src,
                         local[i].item_type[0] ? local[i].item_type : "KeyItem",
-                        nft, 1, 1);
+                        nft, qty, qty);
                     add_item_calls++;
                 } else {
                     /* Unlock: add only if not already in inventory. */
@@ -753,6 +754,8 @@ static void* inventory_thread_proc(void* param) {
                 const char* flush_err = star_api_get_last_error();
                 str_copy(g_inv_add_item_error, flush_err ? flush_err : "flush add_item jobs failed", sizeof(g_inv_add_item_error));
             }
+            /* Invalidate cache so next get_inventory fetches from API and returns correct quantities (client was appending each add response to cache, so cache had duplicate/stacked entries). */
+            star_api_invalidate_inventory_cache();
         }
     }
 
