@@ -135,6 +135,8 @@ void() finale_1 =
 	local entity	pos, pl;
 	local entity	timer;
 
+	OQuake_OnBossKilled("Shub-Niggurath");
+
 	intermission_exittime = time + 10000000;	// never allow exit
 	intermission_running = 1;
 

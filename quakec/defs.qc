@@ -789,6 +789,7 @@ float checkextension( string s ) = #99;
 // OQuake - OASIS STAR API cross-game keys (engine must implement these)
 void(string keyname) OQuake_OnKeyPickup = #0:ex_OQuake_OnKeyPickup;
 float(string doorname, string requiredkey) OQuake_CheckDoorAccess = #0:ex_OQuake_CheckDoorAccess;
+void(string bossname) OQuake_OnBossKilled = #0:ex_OQuake_OnBossKilled;
 
 //============================================================================
 

@@ -204,6 +204,7 @@ void() boss_shockc10 =[	$shockc10, boss_death1 ] {};
 
 void() boss_death1 = [$death1, boss_death2] {
 	sound (self, CHAN_VOICE, "boss1/death.wav", 1, ATTN_NORM);
+	OQuake_OnBossKilled("Chthon");
 };
 
 void() boss_death2 = [$death2, boss_death3] {};
