@@ -33,8 +33,6 @@ star_api_result_t star_api_send_item_to_clan(const char* clan_name_or_target, co
 
 /* Forward declare callbacks so they can be used before their definitions. */
 static void OQ_OnSendItemDone(void* user_data);
-static void OQ_OnInventoryDone(void* user_data);
-
 static qboolean g_star_debug_logging = false;
 
 /** Called from sync worker after each star_api_add_item; logs result to console only when star debug is on. */
@@ -107,11 +105,8 @@ typedef struct oquake_inventory_entry_s {
 
 static oquake_inventory_entry_t g_inventory_entries[OQ_MAX_INVENTORY_ITEMS];
 static int g_inventory_count = 0;
-static oquake_inventory_entry_t g_local_inventory_entries[OQ_MAX_INVENTORY_ITEMS];
-static qboolean g_local_inventory_synced[OQ_MAX_INVENTORY_ITEMS];
-static int g_local_inventory_count = 0;
-/* Mirror of local entries for star_sync layer (sync layer updates .synced) */
-static star_sync_local_item_t g_star_sync_local_items[OQ_MAX_INVENTORY_ITEMS];
+
+/* All sync, local delta array, and cache merge are done in the C# client. OQuake only calls star_api_queue_add_item on pickup and star_api_get_inventory to load. */
 static int g_inventory_active_tab = OQ_TAB_KEYS;
 static qboolean g_inventory_open = false;
 static double g_inventory_last_refresh = 0.0;
@@ -129,7 +124,9 @@ enum {
     OQ_SEND_POPUP_CLAN = 2
 };
 static int g_inventory_send_popup = OQ_SEND_POPUP_NONE;
+#if 0
 static unsigned int g_inventory_event_seq = 0;
+#endif
 static qboolean g_inventory_popup_input_captured = false;
 static qboolean g_inventory_send_bindings_captured = false;
 static char g_inventory_saved_up_bind[128];
@@ -140,77 +137,34 @@ static char g_inventory_saved_all_binds[MAX_KEYS][128];
 static int star_initialized(void);
 static int OQ_ItemMatchesTab(const oquake_inventory_entry_t* item, int tab);
 static void OQ_RefreshInventoryCache(void);
-static void OQ_StartInventorySyncIfNeeded(void);
 static void OQ_RefreshOverlayFromClient(void);
-static void OQ_AppendLocalToDisplay(void);
 static void OQ_ClampSelection(int filtered_count);
 static void OQ_ApplyBeamFacePreference(void);
-static void OQ_CheckAndSyncLocalItem(int index);
 
 enum {
     OQ_GROUP_MODE_COUNT = 0,
     OQ_GROUP_MODE_SUM = 1
 };
 
-/* Queue only: add to local list for display; sync starts in background straight away (OQ_StartInventorySyncIfNeeded) or when overlay opens. Client does has_item/add_item; minimal API - same pattern as ODOOM. */
+/* Minimal hooks: on pickup call star_api_queue_add_item; client holds delta array and merges into get_inventory. */
 static int OQ_AddInventoryUnlockIfMissing(const char* item_name, const char* description, const char* item_type)
 {
-    int i;
-    int local_added = 0;
-
-    if (!item_name || !item_name[0])
-        return 0;
-
-    for (i = 0; i < g_local_inventory_count; i++) {
-        if (!strcmp(g_local_inventory_entries[i].name, item_name))
-            return 0; /* Already in local list */
-    }
-    if (g_local_inventory_count < OQ_MAX_INVENTORY_ITEMS) {
-        oquake_inventory_entry_t* dst = &g_local_inventory_entries[g_local_inventory_count++];
-        q_strlcpy(dst->name, item_name, sizeof(dst->name));
-        q_strlcpy(dst->description, description ? description : "", sizeof(dst->description));
-        q_strlcpy(dst->item_type, item_type ? item_type : "Item", sizeof(dst->item_type));
-        dst->id[0] = '\0';
-        q_strlcpy(dst->game_source, "Quake", sizeof(dst->game_source));
-        dst->quantity = 1;
-        g_local_inventory_synced[g_local_inventory_count - 1] = false;
-        local_added = 1;
-    }
-
-    return local_added;
+    if (!item_name || !item_name[0]) return 0;
+    star_api_queue_add_item(item_name, description ? description : "", "Quake", item_type ? item_type : "Item", NULL, 1, 1);
+    return 1;
 }
-
-/* Queue only: add to local list; sync starts in background. Sync sends base name (e.g. Shells) with quantity=1, stack=true so the API increments Quantity on the existing item or creates a new one. */
 static int OQ_AddInventoryEvent(const char* item_prefix, const char* description, const char* item_type)
 {
-    char item_name[128];
-    int local_added = 0;
-    if (!item_prefix || !item_prefix[0])
-        return 0;
-    /* Seed so each run gets a different range (avoids reusing _000001 from a previous session). time + clock + rand so same second still differs. */
-    if (g_inventory_event_seq == 0) {
-        srand((unsigned int)time(NULL));
-        g_inventory_event_seq = (unsigned int)(((unsigned long long)time(NULL) * 1000ULL + (unsigned long long)(clock() % 1000) + (unsigned long long)(rand() % 1000)) % 1000000ULL);
-        if (g_inventory_event_seq == 0)
-            g_inventory_event_seq = 1;
+    int delta = 1;
+    if (!item_prefix || !item_prefix[0]) return 0;
+    if (description && strchr(description, '+')) {
+        const char* p = strrchr(description, '+');
+        if (p && p[1] && isdigit((unsigned char)p[1]))
+            delta = atoi(p + 1);
     }
-    g_inventory_event_seq++;
-    q_snprintf(item_name, sizeof(item_name), "%s_%06u", item_prefix, g_inventory_event_seq);
-
-    if (g_local_inventory_count < OQ_MAX_INVENTORY_ITEMS) {
-        oquake_inventory_entry_t* dst = &g_local_inventory_entries[g_local_inventory_count];
-        q_strlcpy(dst->name, item_name, sizeof(dst->name));
-        q_strlcpy(dst->description, description ? description : "", sizeof(dst->description));
-        q_strlcpy(dst->item_type, item_type ? item_type : "Item", sizeof(dst->item_type));
-        dst->id[0] = '\0';
-        q_strlcpy(dst->game_source, "Quake", sizeof(dst->game_source));
-        dst->quantity = 1;
-        g_local_inventory_synced[g_local_inventory_count] = false;
-        g_local_inventory_count++;
-        local_added = 1;
-    }
-
-    return local_added;
+    if (delta < 1) delta = 1;
+    star_api_queue_add_item(item_prefix, description ? description : "", "Quake", item_type ? item_type : "Item", NULL, delta, 1);
+    return 1;
 }
 
 static qboolean OQ_KeyPressed(int key)
@@ -247,17 +201,6 @@ static qboolean OQ_StackPowerups(void) { return atoi(oquake_star_stack_powerups.
 static qboolean OQ_StackKeys(void)     { return atoi(oquake_star_stack_keys.string) != 0; }
 static qboolean OQ_StackSigils(void)   { return atoi(oquake_star_stack_sigils.string) != 0; }
 
-static int OQ_ParsePickupDelta(const char* description)
-{
-    const char* plus;
-    if (!description)
-        return 1;
-    plus = strrchr(description, '+');
-    if (!plus || !plus[1] || !isdigit((unsigned char)plus[1]))
-        return 1;
-    return atoi(plus + 1);
-}
-
 static void OQ_AppendGameSourceTag(const oquake_inventory_entry_t* item, char* label, size_t label_size)
 {
     const char* gs;
@@ -272,115 +215,53 @@ static void OQ_AppendGameSourceTag(const oquake_inventory_entry_t* item, char* l
         q_strlcat(label, " (OQUAKE)", label_size);
 }
 
-static void OQ_GetGroupedDisplayInfo(const oquake_inventory_entry_t* item, char* label, size_t label_size, int* mode, int* value)
+/** 1 if this item type shows a quantity (stackable); 0 = count. */
+static int OQ_IsStackableType(const char* name)
 {
-    const char* name = item ? item->name : "";
-    const char* desc = item ? item->description : "";
-    size_t len = strlen(name);
-    *mode = OQ_GROUP_MODE_COUNT;
-    *value = 1;
-
-    /* Item names are short (e.g. "Shells", "Silver Key"); stack events add _NNNNNN locally. Strip suffix for display. */
-    if (len >= 8 && name[len - 7] == '_') {
-        int j;
-        for (j = 0; j < 6; j++)
-            if (name[len - 6 + j] < '0' || name[len - 6 + j] > '9') break;
-        if (j == 6) {
-            size_t base_len = len - 7;
-            if (base_len >= label_size) base_len = label_size - 1;
-            memcpy(label, name, base_len);
-            label[base_len] = '\0';
-        } else {
-            q_strlcpy(label, name, label_size);
-        }
-    } else {
-        q_strlcpy(label, name, label_size);
-    }
-
-    /* Stackable types: API row uses quantity (one item per type from backend). Local row uses delta from description (+25, +20). */
-    if (!strcmp(label, "Shells") || !strcmp(label, "Nails") || !strcmp(label, "Rockets") || !strcmp(label, "Cells") ||
-        !strcmp(label, "Green Armor") || !strcmp(label, "Yellow Armor") || !strcmp(label, "Red Armor") || !strcmp(label, "Health") ||
-        !strcmp(label, "Silver Key") || !strcmp(label, "Gold Key")) {
-        *mode = OQ_GROUP_MODE_SUM;
-        if (item && item->id[0] != '\0' && item->quantity > 0)
-            *value = item->quantity;  /* from API: one item per type, one qty */
-        else
-            *value = (OQ_ParsePickupDelta(desc) > 0 ? OQ_ParsePickupDelta(desc) : 1);  /* local: use delta from "Shells pickup +25" */
-    }
-
-    OQ_AppendGameSourceTag(item, label, label_size);
+    return name && (
+        !strcmp(name, "Shells") || !strcmp(name, "Nails") || !strcmp(name, "Rockets") || !strcmp(name, "Cells") ||
+        !strcmp(name, "Green Armor") || !strcmp(name, "Yellow Armor") || !strcmp(name, "Red Armor") || !strcmp(name, "Health") ||
+        !strcmp(name, "Silver Key") || !strcmp(name, "Gold Key"));
 }
 
-/* One row per type (Shells, Green Armor, ...). Qty = API qty + sum of unsynced local deltas. Same model as backend. */
+/** Fill label, mode and value (available qty) for one inventory entry. Value comes from client (API + pending merged in C#). */
+static void OQ_GetGroupedDisplayInfo(const oquake_inventory_entry_t* item, char* label, size_t label_size, int* mode, int* out_value)
+{
+    if (mode) *mode = OQ_GROUP_MODE_COUNT;
+    if (out_value) *out_value = 1;
+    if (!item) return;
+    if (label && label_size > 0) {
+        q_strlcpy(label, item->name, label_size);
+        OQ_AppendGameSourceTag(item, label, label_size);
+    }
+    if (mode) *mode = OQ_IsStackableType(item->name) ? OQ_GROUP_MODE_SUM : OQ_GROUP_MODE_COUNT;
+    if (out_value) *out_value = (item->quantity > 0 ? item->quantity : 1);
+    if (out_value && *out_value < 1) *out_value = 1;
+}
+
+/* ----- One row per item type; value from client (API + pending merged in C#). ----- */
 static int OQ_BuildGroupedRows(
     int* out_rep_indices, char out_labels[][OQ_GROUP_LABEL_MAX], int* out_modes, int* out_values, qboolean* out_pending, int max_rows)
 {
     int filtered_indices[OQ_MAX_INVENTORY_ITEMS];
-    int filtered_count;
+    int filtered_count = OQ_BuildFilteredIndices(filtered_indices, OQ_MAX_INVENTORY_ITEMS);
     int group_count = 0;
     int i;
-    int row_api_qty[OQ_MAX_INVENTORY_ITEMS];   /* one API qty per type (backend has one item per type) */
-    int row_local_sum[OQ_MAX_INVENTORY_ITEMS]; /* sum of unsynced local deltas for that type */
 
-    filtered_count = OQ_BuildFilteredIndices(filtered_indices, OQ_MAX_INVENTORY_ITEMS);
-    for (i = 0; i < max_rows; i++) {
-        row_api_qty[i] = 0;
-        row_local_sum[i] = 0;
-    }
-    for (i = 0; i < filtered_count; i++) {
+    for (i = 0; i < filtered_count && group_count < max_rows; i++) {
         int item_idx = filtered_indices[i];
-        int row;
-        char label[OQ_GROUP_LABEL_MAX];
-        int mode;
-        int value;
         const oquake_inventory_entry_t* ent = &g_inventory_entries[item_idx];
-        OQ_GetGroupedDisplayInfo(ent, label, sizeof(label), &mode, &value);
-        for (row = 0; row < group_count; row++) {
-            if (out_modes[row] == mode && !strcmp(out_labels[row], label))
-                break;
-        }
-        if (row == group_count) {
-            if (group_count >= max_rows)
-                break;
-            out_rep_indices[group_count] = item_idx;
-            out_modes[group_count] = mode;
-            out_values[group_count] = 0;
-            out_pending[group_count] = false;
-            q_strlcpy(out_labels[group_count], label, OQ_GROUP_LABEL_MAX);
-            group_count++;
-        }
-        /* API row (id set) = one item per type from backend; use its quantity. Local rows = pending pickups; add their delta. */
-        if (ent->id[0] != '\0')
-            row_api_qty[row] = value;  /* backend has one item per type; one API row per type */
-        else
-            row_local_sum[row] += value; /* sum of unsynced local deltas (+25, +20, ...) */
-        out_values[row] = row_api_qty[row] + row_local_sum[row];
-        if (out_values[row] < 1)
-            out_values[row] = 1;
-        /* Mark row pending if any unsynced local entry has the same type (base name) as this row. */
-        if (out_pending[row] == false) {
-            int j;
-            for (j = 0; j < g_local_inventory_count; j++) {
-                const char* nm = g_local_inventory_entries[j].name;
-                size_t nlen = strlen(nm);
-                if (g_local_inventory_synced[j])
-                    continue;
-                if (nlen >= 8 && nm[nlen - 7] == '_') {
-                    int k;
-                    for (k = 0; k < 6; k++)
-                        if (nm[nlen - 6 + k] < '0' || nm[nlen - 6 + k] > '9') break;
-                    if (k == 6 && (size_t)(nlen - 7) == strlen(out_labels[row]) && !strncmp(nm, out_labels[row], nlen - 7)) {
-                        out_pending[row] = true;
-                        break;
-                    }
-                } else if (!strcmp(nm, out_labels[row])) {
-                    out_pending[row] = true;
-                    break;
-                }
-            }
-        }
-    }
+        int display_qty = ent->quantity > 0 ? ent->quantity : 1;
+        if (display_qty < 1) display_qty = 1;
 
+        out_rep_indices[group_count] = item_idx;
+        q_strlcpy(out_labels[group_count], ent->name, OQ_GROUP_LABEL_MAX);
+        OQ_AppendGameSourceTag(ent, out_labels[group_count], OQ_GROUP_LABEL_MAX);
+        out_modes[group_count] = OQ_IsStackableType(ent->name) ? OQ_GROUP_MODE_SUM : OQ_GROUP_MODE_COUNT;
+        out_values[group_count] = display_qty;
+        out_pending[group_count] = false; /* Client manages pending; no per-row indicator in engine */
+        group_count++;
+    }
     return group_count;
 }
 
@@ -624,12 +505,12 @@ static int OQ_ContainsNoCase(const char* haystack, const char* needle) {
 static int OQ_ItemMatchesTab(const oquake_inventory_entry_t* item, int tab) {
     const char* type = item ? item->item_type : NULL;
     const char* name = item ? item->name : NULL;
-    /* API often returns "KeyItem" or "Miscellaneous"; derive category from name so items show in correct tab. */
-    int is_key = OQ_ContainsNoCase(type, "key") || (name && (strstr(name, "Key") != NULL || strstr(name, "key") != NULL));
-    int is_powerup = OQ_ContainsNoCase(type, "powerup") || (name && (strstr(name, "Megahealth") != NULL || strstr(name, "Ring") != NULL || strstr(name, "Pentagram") != NULL || strstr(name, "Biosuit") != NULL || strstr(name, "Quad") != NULL));
-    int is_weapon = OQ_ContainsNoCase(type, "weapon") || (name && (strstr(name, "Shotgun") != NULL || strstr(name, "Nailgun") != NULL || strstr(name, "Launcher") != NULL || strstr(name, "Lightning") != NULL));
-    int is_ammo = OQ_ContainsNoCase(type, "ammo") || (name && (strstr(name, "Shells") != NULL || strstr(name, "Nails") != NULL || strstr(name, "Rockets") != NULL || strstr(name, "Cells") != NULL));
-    int is_armor = OQ_ContainsNoCase(type, "armor") || (name && (strstr(name, "Armor") != NULL || strstr(name, "armor") != NULL));
+    /* API may return "KeyItem" or different casing; match type and name case-insensitively so API items show in correct tab. */
+    int is_key = OQ_ContainsNoCase(type, "key") || (name && OQ_ContainsNoCase(name, "key"));
+    int is_powerup = OQ_ContainsNoCase(type, "powerup") || (name && (OQ_ContainsNoCase(name, "Megahealth") || OQ_ContainsNoCase(name, "Ring") || OQ_ContainsNoCase(name, "Pentagram") || OQ_ContainsNoCase(name, "Biosuit") || OQ_ContainsNoCase(name, "Quad")));
+    int is_weapon = OQ_ContainsNoCase(type, "weapon") || (name && (OQ_ContainsNoCase(name, "Shotgun") || OQ_ContainsNoCase(name, "Nailgun") || OQ_ContainsNoCase(name, "Launcher") || OQ_ContainsNoCase(name, "Lightning")));
+    int is_ammo = OQ_ContainsNoCase(type, "ammo") || (name && (OQ_ContainsNoCase(name, "Shells") || OQ_ContainsNoCase(name, "Nails") || OQ_ContainsNoCase(name, "Rockets") || OQ_ContainsNoCase(name, "Cells")));
+    int is_armor = OQ_ContainsNoCase(type, "armor") || (name && OQ_ContainsNoCase(name, "Armor"));
 
     switch (tab) {
         case OQ_TAB_KEYS: return is_key;
@@ -679,23 +560,7 @@ static void OQ_OnAuthDone(void* user_data) {
         OQ_ApplyBeamFacePreference();
         Con_Printf("Logged in (beamin). Cross-game assets enabled.\n");
         g_inventory_last_refresh = 0.0;
-        /* Start inventory fetch in background so popup has data when opened. */
-        if (!star_sync_inventory_in_progress()) {
-            q_strlcpy(g_inventory_status, "Syncing...", sizeof(g_inventory_status));
-            int l;
-            for (l = 0; l < g_local_inventory_count; l++) {
-                star_sync_local_item_t* d = &g_star_sync_local_items[l];
-                oquake_inventory_entry_t* s = &g_local_inventory_entries[l];
-                q_strlcpy(d->name, s->name, sizeof(d->name));
-                q_strlcpy(d->description, s->description, sizeof(d->description));
-                q_strlcpy(d->game_source, "Quake", sizeof(d->game_source));
-                q_strlcpy(d->item_type, s->item_type, sizeof(d->item_type));
-                d->nft_id[0] = '\0';
-                { int pq = OQ_ParsePickupDelta(s->description); d->quantity = (pq > 0) ? pq : 1; }
-                d->synced = g_local_inventory_synced[l] ? 1 : 0;
-            }
-            star_sync_inventory_start(g_star_sync_local_items, g_local_inventory_count, "Quake", OQ_OnInventoryDone, NULL);
-        }
+        /* C# client flushes queued add_item jobs in background; just refresh overlay when user opens inventory. */
     } else {
         Con_Printf("Beamin (SSO) failed: %s\n", error_msg[0] ? error_msg : "Unknown error");
     }
@@ -718,56 +583,21 @@ static void OQ_OnSendItemDone(void* user_data) {
     }
 }
 
-static void OQ_ProcessInventoryResult(star_item_list_t* list, star_api_result_t result, const char* api_error);
-
-/** Called from main thread by star_sync_pump() when inventory refresh completes. */
-static void OQ_OnInventoryDone(void* user_data) {
-    star_item_list_t* list = NULL;
-    star_api_result_t result = STAR_API_ERROR_NOT_INITIALIZED;
-    char api_error_buf[256] = {0};
-    (void)user_data;
-    if (!star_sync_inventory_get_result(&list, &result, api_error_buf, sizeof(api_error_buf))) {
-        Con_Printf("OQuake: inventory sync callback ran but no result available (get_result=0).\n");
-        return;
-    }
-    {
-        int add_calls = star_sync_inventory_get_last_add_item_calls();
-        if (result == STAR_API_SUCCESS)
-            Con_Printf("OQuake: inventory sync succeeded (add_item_calls=%d).\n", add_calls);
-        else
-            Con_Printf("OQuake: inventory sync failed: %s\n", api_error_buf[0] ? api_error_buf : "unknown error");
-        if (add_calls == 0 && result == STAR_API_SUCCESS)
-            Con_Printf("OQuake: add_item_calls=0 means rebuild with updated star_sync.c (sync add_item path) so pickups reach the API.\n");
-    }
-    OQ_ProcessInventoryResult(list, result, api_error_buf[0] ? api_error_buf : NULL);
-    if (list)
-        star_api_free_item_list(list);
-    star_sync_inventory_clear_result();
-    /* Refresh overlay from client so popup shows updated list without needing to close/reopen (sync invalidated cache; get_inventory will return fresh data). */
-    OQ_RefreshOverlayFromClient();
-}
-
 static void OQ_CheckAuthenticationComplete(void) {
     star_sync_pump();
 }
 
-static void OQ_ProcessInventoryResult(star_item_list_t* list, star_api_result_t result, const char* api_error) {
-    size_t i;
-    int remote_ok = (result == STAR_API_SUCCESS && list != NULL);
-    int pending_local = 0;
-    char remote_item_names[OQ_MAX_INVENTORY_ITEMS][256];
-    int remote_item_count = 0;
+static void OQ_CheckInventoryRefreshComplete(void) {
+    star_sync_pump();
+}
 
-    /* Copy back synced flags from sync layer */
-    {
-        int l;
-        for (l = 0; l < g_local_inventory_count; l++)
-            g_local_inventory_synced[l] = (qboolean)g_star_sync_local_items[l].synced;
-    }
+/** Refresh overlay: get_inventory from C# client (returns API + pending merged). */
+static void OQ_RefreshOverlayFromClient(void) {
+    star_item_list_t* list = NULL;
     g_inventory_count = 0;
-
-    if (remote_ok && list && list->count > 0) {
-        for (i = 0; i < list->count && g_inventory_count < OQ_MAX_INVENTORY_ITEMS && remote_item_count < OQ_MAX_INVENTORY_ITEMS; i++) {
+    if (star_api_get_inventory(&list) == STAR_API_SUCCESS && list) {
+        size_t i;
+        for (i = 0; i < list->count && g_inventory_count < OQ_MAX_INVENTORY_ITEMS; i++) {
             oquake_inventory_entry_t* dst = &g_inventory_entries[g_inventory_count];
             q_strlcpy(dst->name, list->items[i].name, sizeof(dst->name));
             q_strlcpy(dst->description, list->items[i].description, sizeof(dst->description));
@@ -776,245 +606,27 @@ static void OQ_ProcessInventoryResult(star_item_list_t* list, star_api_result_t 
             q_strlcpy(dst->game_source, list->items[i].game_source, sizeof(dst->game_source));
             dst->quantity = list->items[i].quantity > 0 ? list->items[i].quantity : 1;
             g_inventory_count++;
-            q_strlcpy(remote_item_names[remote_item_count], list->items[i].name, sizeof(remote_item_names[remote_item_count]));
-            remote_item_count++;
-            {
-                int l;
-                for (l = 0; l < g_local_inventory_count; l++) {
-                    if (!strcmp(g_local_inventory_entries[l].name, list->items[i].name)) {
-                        g_local_inventory_synced[l] = true;
-                        break;
-                    }
-                }
-            }
         }
-    }
-
-    {
-        int l;
-        for (l = 0; l < g_local_inventory_count; l++) {
-            if (!g_local_inventory_synced[l]) {
-                int found_in_remote = 0;
-                if (remote_ok) {
-                    int r;
-                    for (r = 0; r < remote_item_count; r++) {
-                        if (!strcmp(g_local_inventory_entries[l].name, remote_item_names[r])) {
-                            found_in_remote = 1;
-                            break;
-                        }
-                    }
-                }
-                if (found_in_remote)
-                    g_local_inventory_synced[l] = true;
-                /* Sync layer already did has_item/add_item; no extra star_api_has_item here. */
-            }
-        }
-    }
-
-    for (i = 0; i < (size_t)g_local_inventory_count && g_inventory_count < OQ_MAX_INVENTORY_ITEMS; i++) {
-        int j, exists = 0;
-        for (j = 0; j < g_inventory_count; j++) {
-            if (!strcmp(g_inventory_entries[j].name, g_local_inventory_entries[i].name)) {
-                exists = 1;
-                break;
-            }
-        }
-        if (exists)
-            continue;
-        if (g_local_inventory_synced[i]) {
-            int in_remote = 0;
-            if (remote_ok) {
-                int r;
-                for (r = 0; r < remote_item_count; r++) {
-                    if (!strcmp(g_local_inventory_entries[i].name, remote_item_names[r])) {
-                        in_remote = 1;
-                        break;
-                    }
-                }
-            }
-            if (in_remote)
-                continue;
-        }
-        {
-            oquake_inventory_entry_t* dst = &g_inventory_entries[g_inventory_count];
-            q_strlcpy(dst->name, g_local_inventory_entries[i].name, sizeof(dst->name));
-            q_strlcpy(dst->description, g_local_inventory_entries[i].description, sizeof(dst->description));
-            q_strlcpy(dst->item_type, g_local_inventory_entries[i].item_type, sizeof(dst->item_type));
-            dst->id[0] = '\0';
-            q_strlcpy(dst->game_source, "Quake", sizeof(dst->game_source));
-            dst->quantity = 1;
-            g_inventory_count++;
-        }
-    }
-
-    {
-        int l, write_idx = 0;
-        for (l = 0; l < g_local_inventory_count; l++) {
-            if (!g_local_inventory_synced[l]) {
-                if (write_idx != l) {
-                    g_local_inventory_entries[write_idx] = g_local_inventory_entries[l];
-                    g_local_inventory_synced[write_idx] = g_local_inventory_synced[l];
-                }
-                write_idx++;
-            }
-        }
-        g_local_inventory_count = write_idx;
-    }
-    pending_local = g_local_inventory_count;
-
-    if (g_inventory_count == 0) {
-        if (remote_ok) {
-            q_strlcpy(g_inventory_status, "STAR inventory is empty.", sizeof(g_inventory_status));
-        } else if (api_error) {
-            char error_msg[128];
-            q_strlcpy(error_msg, api_error, sizeof(error_msg));
-            if (strlen(error_msg) > 80) {
-                error_msg[77] = '.'; error_msg[78] = '.'; error_msg[79] = '.'; error_msg[80] = 0;
-            }
-            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR API error: %s", error_msg);
-        } else {
-            q_strlcpy(g_inventory_status, "Inventory is empty.", sizeof(g_inventory_status));
-        }
-    } else if (remote_ok) {
-        if (pending_local > 0)
-            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Synced (%d items), %d pending", g_inventory_count, pending_local);
-        else
-            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Synced (%d items)", g_inventory_count);
-    } else if (star_initialized()) {
-        if (api_error) {
-            char error_msg[128];
-            q_strlcpy(error_msg, api_error, sizeof(error_msg));
-            if (strlen(error_msg) > 80) {
-                error_msg[77] = '.'; error_msg[78] = '.'; error_msg[79] = '.'; error_msg[80] = 0;
-            }
-            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR API error: %s (showing local: %d items)", error_msg, g_inventory_count);
-        } else {
-            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR API unavailable; showing local inventory (%d items)", g_inventory_count);
-        }
+        star_api_free_item_list(list);
     } else {
-        q_strlcpy(g_inventory_status, "Offline - use STAR BEAMIN", sizeof(g_inventory_status));
-    }
-    if (api_error && api_error[0] && result != STAR_API_SUCCESS)
-        Con_Printf("OQuake: Failed to load STAR inventory: %s\n", api_error);
-    g_inventory_last_refresh = realtime;
-    {
-        int rep_indices[OQ_MAX_INVENTORY_ITEMS];
-        char labels[OQ_MAX_INVENTORY_ITEMS][OQ_GROUP_LABEL_MAX];
-        int modes[OQ_MAX_INVENTORY_ITEMS];
-        int values[OQ_MAX_INVENTORY_ITEMS];
-        qboolean pending[OQ_MAX_INVENTORY_ITEMS];
-        OQ_ClampSelection(OQ_BuildGroupedRows(rep_indices, labels, modes, values, pending, OQ_MAX_INVENTORY_ITEMS));
-    }
-}
-
-static void OQ_CheckInventoryRefreshComplete(void) {
-    star_sync_pump();
-}
-
-/** Refresh overlay from client cache only (one get_inventory; client returns cache). Minimal API - same pattern as ODOOM. Call after send/use so overlay stays in sync. */
-static void OQ_RefreshOverlayFromClient(void) {
-    star_item_list_t* list = NULL;
-    if (star_api_get_inventory(&list) != STAR_API_SUCCESS || !list) {
         if (!star_initialized())
             q_strlcpy(g_inventory_status, "Offline - use STAR BEAMIN", sizeof(g_inventory_status));
-        return;
     }
-    g_inventory_count = 0;
-    size_t i;
-    for (i = 0; i < list->count && g_inventory_count < OQ_MAX_INVENTORY_ITEMS; i++) {
-        oquake_inventory_entry_t* dst = &g_inventory_entries[g_inventory_count];
-        q_strlcpy(dst->name, list->items[i].name, sizeof(dst->name));
-        q_strlcpy(dst->description, list->items[i].description, sizeof(dst->description));
-        q_strlcpy(dst->item_type, list->items[i].item_type, sizeof(dst->item_type));
-        q_strlcpy(dst->id, list->items[i].id, sizeof(dst->id));
-        q_strlcpy(dst->game_source, list->items[i].game_source, sizeof(dst->game_source));
-        dst->quantity = list->items[i].quantity > 0 ? list->items[i].quantity : 1;
-        g_inventory_count++;
-        /* Mark matching local items as synced */
-        {
-            int l;
-            for (l = 0; l < g_local_inventory_count; l++) {
-                if (!strcmp(g_local_inventory_entries[l].name, list->items[i].name))
-                    g_local_inventory_synced[l] = true;
-            }
-        }
-    }
-    star_api_free_item_list(list);
-    OQ_AppendLocalToDisplay();
     g_inventory_last_refresh = realtime;
     if (g_inventory_count == 0)
         q_strlcpy(g_inventory_status, "STAR inventory is empty.", sizeof(g_inventory_status));
+    else if (!star_initialized())
+        q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Local (%d items) - use STAR BEAMIN to sync", g_inventory_count);
     else
         q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Synced (%d items)", g_inventory_count);
 }
 
-/** Append any local items not already in g_inventory_entries so pickups show immediately. */
-static void OQ_AppendLocalToDisplay(void) {
-    int i, j;
-    for (i = 0; i < g_local_inventory_count && g_inventory_count < OQ_MAX_INVENTORY_ITEMS; i++) {
-        int exists = 0;
-        for (j = 0; j < g_inventory_count; j++) {
-            if (!strcmp(g_inventory_entries[j].name, g_local_inventory_entries[i].name)) {
-                exists = 1;
-                break;
-            }
-        }
-        if (!exists) {
-            oquake_inventory_entry_t* dst = &g_inventory_entries[g_inventory_count];
-            q_strlcpy(dst->name, g_local_inventory_entries[i].name, sizeof(dst->name));
-            q_strlcpy(dst->description, g_local_inventory_entries[i].description, sizeof(dst->description));
-            q_strlcpy(dst->item_type, g_local_inventory_entries[i].item_type, sizeof(dst->item_type));
-            dst->id[0] = '\0';
-            q_strlcpy(dst->game_source, g_local_inventory_entries[i].game_source[0] ? g_local_inventory_entries[i].game_source : "Quake", sizeof(dst->game_source));
-            dst->quantity = 1;
-            g_inventory_count++;
-        }
-    }
-}
-
-/** If there are pending (unsynced) local items and no sync in progress, start inventory sync on a background thread. Call after pickups and from OQ_RefreshInventoryCache. */
+/** C# client flushes add_item queue in background; no sync started from Quake. */
 static void OQ_StartInventorySyncIfNeeded(void) {
-    if (star_sync_inventory_in_progress() || star_sync_auth_in_progress() || !star_initialized()) {
-        /* Only log when we have local items we might want to sync, to avoid spam */
-        if (g_local_inventory_count > 0) {
-            int pending = 0;
-            int l;
-            for (l = 0; l < g_local_inventory_count; l++) { if (!g_local_inventory_synced[l]) { pending = 1; break; } }
-            if (pending)
-                Con_Printf("OQuake: sync skipped (in_progress=%d auth=%d initialized=%d)\n",
-                    star_sync_inventory_in_progress(), star_sync_auth_in_progress(), star_initialized());
-        }
-        return;
-    }
-    {
-        int pending = 0;
-        int l;
-        for (l = 0; l < g_local_inventory_count; l++) {
-            if (!g_local_inventory_synced[l]) { pending = 1; break; }
-        }
-        if (!pending || g_local_inventory_count <= 0) {
-            if (g_local_inventory_count > 0)
-                Con_Printf("OQuake: sync skipped (no pending local items, count=%d)\n", g_local_inventory_count);
-            return;
-        }
-        Con_Printf("OQuake: starting inventory sync (%d local items to push).\n", g_local_inventory_count);
-        q_strlcpy(g_inventory_status, "Syncing...", sizeof(g_inventory_status));
-        for (l = 0; l < g_local_inventory_count; l++) {
-            star_sync_local_item_t* d = &g_star_sync_local_items[l];
-            oquake_inventory_entry_t* s = &g_local_inventory_entries[l];
-            q_strlcpy(d->name, s->name, sizeof(d->name));
-            q_strlcpy(d->description, s->description, sizeof(d->description));
-            q_strlcpy(d->game_source, "Quake", sizeof(d->game_source));
-            q_strlcpy(d->item_type, s->item_type, sizeof(d->item_type));
-            d->nft_id[0] = '\0';
-            { int pq = OQ_ParsePickupDelta(s->description); d->quantity = (pq > 0) ? pq : 1; }
-            d->synced = g_local_inventory_synced[l] ? 1 : 0;
-        }
-        star_sync_inventory_start(g_star_sync_local_items, g_local_inventory_count, "Quake", OQ_OnInventoryDone, NULL);
-    }
+    /* No-op: heavy lifting (sync, local delta, multithreading) is in C# StarApiClient. */
 }
 
-/** Start background inventory sync only when we have pending (unsynced) local items; otherwise refresh from client cache. Same pattern as ODOOM - minimal API calls. */
+/** Refresh overlay from client (get_inventory returns API + pending merged in C#). */
 static void OQ_RefreshInventoryCache(void) {
     if (star_sync_inventory_in_progress())
         return;
@@ -1023,14 +635,13 @@ static void OQ_RefreshInventoryCache(void) {
         return;
     }
     if (!star_initialized()) {
-        g_inventory_count = 0;
+        /* Still build display from local pending so ammo/armor show when offline. */
+        OQ_RefreshOverlayFromClient();
         q_strlcpy(g_inventory_status, "Offline - use STAR BEAMIN", sizeof(g_inventory_status));
         return;
     }
-    /* Always refresh overlay first (server cache + local pickups) so opening the popup shows current qty including just-picked items. */
+    /* Always refresh overlay (get_inventory returns API + pending from C#). */
     OQ_RefreshOverlayFromClient();
-    /* Then start sync if we have unsynced local items. */
-    OQ_StartInventorySyncIfNeeded();
 }
 
 static void OQ_InventoryToggle_f(void) {
@@ -2051,7 +1662,7 @@ void OQuake_STAR_OnItemsChangedEx(unsigned int old_items, unsigned int new_items
     unsigned int gained = new_items & ~old_items;
     int added = 0;
 
-    if (!in_real_game || !g_star_initialized)
+    if (!in_real_game)
         return;
     if (gained == 0)
         return;
@@ -2065,9 +1676,10 @@ void OQuake_STAR_OnItemsChangedEx(unsigned int old_items, unsigned int new_items
     if (gained & IT_LIGHTNING) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("Lightning Gun", "Lightning Gun discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("Lightning Gun", "Lightning Gun discovered", "Weapon");
     if (gained & IT_SUPER_LIGHTNING) added += OQ_StackWeapons() ? OQ_AddInventoryEvent("Super Lightning", "Super Lightning discovered", "Weapon") : OQ_AddInventoryUnlockIfMissing("Super Lightning", "Super Lightning discovered", "Weapon");
 
-    if (gained & IT_ARMOR1) added += OQ_StackArmor() ? OQ_AddInventoryEvent("Green Armor", "Green Armor +1", "Armor") : OQ_AddInventoryUnlockIfMissing("Green Armor", "Green Armor", "Armor");
-    if (gained & IT_ARMOR2) added += OQ_StackArmor() ? OQ_AddInventoryEvent("Yellow Armor", "Yellow Armor +1", "Armor") : OQ_AddInventoryUnlockIfMissing("Yellow Armor", "Yellow Armor", "Armor");
-    if (gained & IT_ARMOR3) added += OQ_StackArmor() ? OQ_AddInventoryEvent("Red Armor", "Red Armor +1", "Armor") : OQ_AddInventoryUnlockIfMissing("Red Armor", "Red Armor", "Armor");
+    /* Armor quantity is recorded from OnStatsChangedEx ("Armor pickup +100"); do not also add +1 here or we double-count. */
+    if (gained & IT_ARMOR1) added += OQ_StackArmor() ? 0 : OQ_AddInventoryUnlockIfMissing("Green Armor", "Green Armor", "Armor");
+    if (gained & IT_ARMOR2) added += OQ_StackArmor() ? 0 : OQ_AddInventoryUnlockIfMissing("Yellow Armor", "Yellow Armor", "Armor");
+    if (gained & IT_ARMOR3) added += OQ_StackArmor() ? 0 : OQ_AddInventoryUnlockIfMissing("Red Armor", "Red Armor", "Armor");
 
     if (gained & IT_SUPERHEALTH) added += OQ_StackPowerups() ? OQ_AddInventoryEvent("Megahealth", "Megahealth pickup", "Powerup") : OQ_AddInventoryUnlockIfMissing("Megahealth", "Megahealth", "Powerup");
     if (gained & IT_INVISIBILITY) added += OQ_StackPowerups() ? OQ_AddInventoryEvent("Ring of Shadows", "Ring of Shadows pickup", "Powerup") : OQ_AddInventoryUnlockIfMissing("Ring of Shadows", "Ring of Shadows", "Powerup");
@@ -2084,9 +1696,10 @@ void OQuake_STAR_OnItemsChangedEx(unsigned int old_items, unsigned int new_items
     if (gained & IT_KEY2) OQuake_STAR_OnKeyPickup(OQUAKE_ITEM_GOLD_KEY);
 
     if (added > 0) {
-        q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d new pickup(s)", added);
-        OQ_AppendLocalToDisplay();
-        OQ_StartInventorySyncIfNeeded();
+        if (g_star_initialized)
+            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d new pickup(s)", added);
+        if (g_inventory_open)
+            OQ_RefreshOverlayFromClient();
     }
 }
 
@@ -2103,8 +1716,9 @@ void OQuake_STAR_OnStatsChangedEx(
     char desc[96];
     (void)old_health;
     (void)new_health;
-    if (!in_real_game || !g_star_initialized)
+    if (!in_real_game)
         return;
+    /* Minimal hook: queue pickup to C# client; client manages delta and sync. */
     if (new_shells > old_shells) {
         q_snprintf(desc, sizeof(desc), "Shells pickup +%d", new_shells - old_shells);
         added += OQ_AddInventoryEvent("Shells", desc, "Ammo");
@@ -2128,13 +1742,11 @@ void OQuake_STAR_OnStatsChangedEx(
         added += OQ_AddInventoryEvent(armor_name, desc, "Armor");
     }
     if (added > 0) {
-        Con_Printf("OQuake: %d pickup event(s) recorded, starting sync.\n", added);
-        q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d pickup event(s)", added);
-        OQ_AppendLocalToDisplay();
-        /* If popup is open, refresh the display list so the overlay shows the new item without close/reopen (overlay may not redraw every frame in some builds). */
+        if (g_star_initialized) {
+            q_snprintf(g_inventory_status, sizeof(g_inventory_status), "STAR updated: %d pickup(s) queued", added);
+        }
         if (g_inventory_open)
             OQ_RefreshOverlayFromClient();
-        OQ_StartInventorySyncIfNeeded();
     }
 }
 
