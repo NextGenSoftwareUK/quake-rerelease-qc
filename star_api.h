@@ -88,6 +88,12 @@ star_api_result_t star_api_send_item_to_avatar(const char* target_username_or_av
 /** Send item from current avatar's inventory to a clan. Target = clan name (or username). item_id optional (NULL or empty = match by name). */
 star_api_result_t star_api_send_item_to_clan(const char* clan_name_or_target, const char* item_name, int quantity, const char* item_id);
 const char* star_api_get_last_error(void);
+/** Consume last mint result from background pickup-with-mint. Writes item name, NFT ID, and hash to buffers (null-terminated). Returns 1 if a result was available, 0 otherwise. Call from game pump/frame to show mint results in console. */
+#define STAR_API_HAS_CONSUME_LAST_MINT 1
+int star_api_consume_last_mint_result(char* item_name_out, size_t item_name_size, char* nft_id_out, size_t nft_id_size, char* hash_out, size_t hash_size);
+/** Consume last background error (mint/add_item failure or pickup not queued). Writes message to buf (null-terminated). Returns 1 if an error was available, 0 otherwise. Call from game pump to show in console. */
+#define STAR_API_HAS_CONSUME_LAST_BACKGROUND_ERROR 1
+int star_api_consume_last_background_error(char* buf, size_t size);
 void star_api_set_callback(star_api_callback_t callback, void* user_data);
 
 #ifdef __cplusplus
