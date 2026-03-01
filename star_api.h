@@ -78,7 +78,7 @@ star_api_result_t star_api_start_quest(const char* quest_id);
 star_api_result_t star_api_complete_quest_objective(const char* quest_id, const char* objective_id, const char* game_source);
 star_api_result_t star_api_complete_quest(const char* quest_id);
 /** provider: NFT provider (e.g. SolanaOASIS); NULL/empty = use default. Same as nft_provider in oasisstar.json. */
-star_api_result_t star_api_create_boss_nft(const char* boss_name, const char* description, const char* game_source, const char* boss_stats, const char* provider, char* nft_id_out);
+star_api_result_t star_api_create_monster_nft(const char* monster_name, const char* description, const char* game_source, const char* monster_stats, const char* provider, char* nft_id_out);
 star_api_result_t star_api_deploy_boss_nft(const char* nft_id, const char* target_game, const char* location);
 star_api_result_t star_api_get_avatar_id(char* avatar_id_out, size_t avatar_id_size);
 /** Set avatar ID on the client (e.g. after SSO from C++ auth result). Does not change JWT. */
@@ -87,6 +87,14 @@ star_api_result_t star_api_set_avatar_id(const char* avatar_id);
 star_api_result_t star_api_send_item_to_avatar(const char* target_username_or_avatar_id, const char* item_name, int quantity, const char* item_id);
 /** Send item from current avatar's inventory to a clan. Target = clan name (or username). item_id optional (NULL or empty = match by name). */
 star_api_result_t star_api_send_item_to_clan(const char* clan_name_or_target, const char* item_name, int quantity, const char* item_id);
+/** Queue add XP for the beamed-in avatar (e.g. on monster kill). Flushed with add-item jobs or on next API sync. amount must be > 0. */
+void star_api_queue_add_xp(int amount);
+/** Queue monster kill (XP + optional mint + add to inventory). All work runs on background thread; never blocks. provider may be NULL. */
+void star_api_queue_monster_kill(const char* engine_name, const char* display_name, int xp, int is_boss, int do_mint, const char* provider);
+/** Get last known avatar XP (from get-current-avatar or after add-xp). Returns 0 if not loaded. Write to *xp_out; pass NULL to skip. Returns 1 if value is valid, 0 otherwise. */
+int star_api_get_avatar_xp(int* xp_out);
+/** Refresh avatar profile (including XP) from API. Call after beam-in so HUD shows correct XP immediately. Non-blocking (queued). */
+void star_api_refresh_avatar_xp(void);
 const char* star_api_get_last_error(void);
 /** Consume last mint result from background pickup-with-mint. Writes item name, NFT ID, and hash to buffers (null-terminated). Returns 1 if a result was available, 0 otherwise. Call from game pump/frame to show mint results in console. */
 #define STAR_API_HAS_CONSUME_LAST_MINT 1
