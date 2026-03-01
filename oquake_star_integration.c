@@ -645,11 +645,11 @@ static void OQ_OnAuthDone(void* user_data) {
             Con_Printf("Warning: Could not get avatar ID: %s\n", error_msg[0] ? error_msg : "Unknown error");
         }
         OQ_ApplyBeamFacePreference();
+        /* Refresh XP via same add-xp path as monster kill (async; cache updates when response returns). */
+        star_api_refresh_avatar_xp();
         g_star_beamed_in = 1;
         Con_Printf("Logged in (beamin). Cross-game assets enabled.\n");
         g_inventory_last_refresh = 0.0;
-        star_api_refresh_avatar_xp();
-        /* C# client flushes queued add_item jobs in background; just refresh overlay when user opens inventory. */
     } else {
         Con_Printf("Beamin (SSO) failed: %s\n", error_msg[0] ? error_msg : "Unknown error");
     }
@@ -2099,6 +2099,20 @@ void OQuake_STAR_PollItems(void) {
         g_oq_reapply_json_frames--;
     }
 
+    /* One-time delayed XP refresh ~3s after beam-in so HUD shows correct XP if API was slow or format differs. */
+    {
+        static int xp_refresh_delay = 0;
+        static int xp_refresh_done = 0;
+        if (g_star_beamed_in && !xp_refresh_done) {
+            if (xp_refresh_delay < 180)  /* ~3 sec at 60 fps */
+                xp_refresh_delay++;
+            else {
+                star_api_refresh_avatar_xp();
+                xp_refresh_done = 1;
+            }
+        }
+    }
+
     if (!sv.active || cls.demoplayback) {
         poll_prev_items = (unsigned int)cl.items;
         poll_prev_shells = cl.stats[STAT_SHELLS];
@@ -2492,8 +2506,8 @@ void OQuake_STAR_Console_f(void) {
         }
         if (g_star_config.api_key && g_star_config.avatar_id) {
             g_star_initialized = 1;
+            star_api_refresh_avatar_xp();  /* Same add-xp(0) path as monster kill (async). */
             g_star_beamed_in = 1;
-            star_api_refresh_avatar_xp();
             // Try to get username from avatar_id or use a default
             if (g_star_config.avatar_id) {
                 q_strlcpy(g_star_username, "API User", sizeof(g_star_username));
