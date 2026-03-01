@@ -1929,7 +1929,7 @@ void OQuake_STAR_OnMonsterKilled(const char* monster_name) {
     idx = (int)(e - OQUAKE_MONSTERS);
     do_mint = OQ_ShouldMintMonster(idx) ? 1 : 0;
     prov = oquake_star_nft_provider.string && oquake_star_nft_provider.string[0] ? oquake_star_nft_provider.string : "SolanaOASIS";
-    star_api_queue_monster_kill(e->engine_name, e->display_name, e->xp, e->is_boss, do_mint, prov);
+    star_api_queue_monster_kill(e->engine_name, e->display_name, e->xp, e->is_boss, do_mint, prov, "OQUAKE");
 }
 
 void OQuake_STAR_OnBossKilled(const char* boss_name) {
@@ -2961,10 +2961,10 @@ void OQuake_STAR_DrawXpStatus(cb_context_t* cbx) {
     if (!star_api_get_avatar_xp(&xp))
         return;
     q_snprintf(buf, sizeof(buf), "XP: %d", xp);
+    /* Top right: same horizontal alignment as version, a bit below top edge */
     x = glwidth - (int)strlen(buf) * 8 - 8;
-    y = glheight - 34;
+    y = 12;
     if (x < 8) x = 8;
-    if (y < 8) y = 8;
     Draw_String(cbx, x, y, buf);
 }
 
