@@ -1919,8 +1919,14 @@ void OQuake_STAR_OnMonsterKilled(const char* monster_name) {
     int do_mint;
     const char* prov;
     int idx;
-    if (!monster_name || !monster_name[0] || !g_star_initialized)
+    if (!monster_name || !monster_name[0]) {
+        Con_Printf("OQuake STAR: OnMonsterKilled called with empty name (hook may be mis-installed)\n");
         return;
+    }
+    if (!g_star_initialized) {
+        Con_Printf("OQuake STAR: monster \"%s\" killed but not beamed in (no XP/mint)\n", monster_name);
+        return;
+    }
     e = OQ_FindMonsterByEngineName(monster_name);
     if (!e) {
         Con_Printf("OQuake STAR: unknown monster \"%s\" (no XP/mint)\n", monster_name);
@@ -1929,6 +1935,7 @@ void OQuake_STAR_OnMonsterKilled(const char* monster_name) {
     idx = (int)(e - OQUAKE_MONSTERS);
     do_mint = OQ_ShouldMintMonster(idx) ? 1 : 0;
     prov = oquake_star_nft_provider.string && oquake_star_nft_provider.string[0] ? oquake_star_nft_provider.string : "SolanaOASIS";
+    Con_Printf("OQuake STAR: monster kill queued: %s (%d XP, mint=%d)\n", e->display_name, e->xp, do_mint);
     star_api_queue_monster_kill(e->engine_name, e->display_name, e->xp, e->is_boss, do_mint, prov, "OQUAKE");
 }
 
