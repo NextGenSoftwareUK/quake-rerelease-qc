@@ -1923,38 +1923,79 @@ void OQuake_STAR_OnMonsterKilled(const char* monster_name) {
     int do_mint;
     const char* prov;
     int idx;
+    char star_log_buf[256];
     if (!monster_name || !monster_name[0]) {
         Con_Printf("OQuake STAR: OnMonsterKilled called with empty name (hook may be mis-installed)\n");
         return;
     }
     if (!g_star_initialized) {
         Con_Printf("OQuake STAR: monster \"%s\" killed but not beamed in (no XP/mint)\n", monster_name);
+        snprintf(star_log_buf, sizeof(star_log_buf), "OQUAKE: monster \"%s\" killed but not beamed in (no XP/mint)", monster_name);
+        star_api_log_to_file(star_log_buf);
         return;
     }
     e = OQ_FindMonsterByEngineName(monster_name);
     if (!e) {
         Con_Printf("OQuake STAR: unknown monster \"%s\" (no XP/mint)\n", monster_name);
+        snprintf(star_log_buf, sizeof(star_log_buf), "OQUAKE: unknown monster \"%s\" (no XP/mint)", monster_name);
+        star_api_log_to_file(star_log_buf);
         return;
     }
     idx = (int)(e - OQUAKE_MONSTERS);
     do_mint = OQ_ShouldMintMonster(idx) ? 1 : 0;
     prov = oquake_star_nft_provider.string && oquake_star_nft_provider.string[0] ? oquake_star_nft_provider.string : "SolanaOASIS";
     Con_Printf("OQuake STAR: monster kill queued: %s (%d XP, mint=%d)\n", e->display_name, e->xp, do_mint);
+    snprintf(star_log_buf, sizeof(star_log_buf), "OQUAKE: monster kill queued: %s (%d XP, mint=%d)", e->display_name, e->xp, do_mint);
+    star_api_log_to_file(star_log_buf);
     star_api_queue_monster_kill(e->engine_name, e->display_name, e->xp, e->is_boss, do_mint, prov, "OQUAKE");
 }
 
-/* Safe ED_Free hook: only run when in a real game so we avoid VM/state issues (program error on new game / load). */
+/* Grace period after level becomes active: ignore monster_ frees in this window (level-load cleanup, not real kills). */
+#define OQUAKE_STAR_KILL_GRACE_FRAMES 90   /* ~1.5 sec at 60fps; filters level-load entity frees */
+
+/* Hook: called from ED_Free (pr_edict.c) and PF_sv_makestatic (pr_cmds.c). Dedupe same entity same frame. */
 void OQuake_STAR_OnEntityFreed(void* ed) {
     const char* ed_classname;
+    char buf[320];
+    static void* s_last_counted_ed;
+    static int s_last_counted_frame = -1;
+    int counted;
+
     if (!ed)
         return;
-    /* Only during active game; skip during demo playback, map load, or menu. */
-    if (!sv.active || cls.demoplayback)
-        return;
     ed_classname = PR_GetString(((edict_t*)ed)->v.classname);
+    /* Log first 200 entity frees when in level so we see if hook runs and what classnames we get on kill. */
+    {
+        static int s_any_log = 0;
+        if (sv.active && !cls.demoplayback && s_any_log < 200) {
+            s_any_log++;
+            snprintf(buf, sizeof(buf), "OQUAKE: entity freed #%d classname=%s", s_any_log, ed_classname ? ed_classname : "(null)");
+            star_api_log_to_file(buf);
+            Con_Printf("OQuake STAR: %s\n", buf);
+        }
+    }
     if (!ed_classname || strncmp(ed_classname, "monster_", 8) != 0)
         return;
-    Con_Printf("OQuake STAR: monster freed: %s (hook reached, queuing)\n", ed_classname);
+
+    /* Only skip demo playback; count all monster frees so kills are never filtered out. */
+    counted = cls.demoplayback ? 0 : 1;
+
+    snprintf(buf, sizeof(buf), "OQUAKE: monster freed classname=%s sv.active=%d demoplayback=%d counted=%d",
+        ed_classname, sv.active ? 1 : 0, cls.demoplayback ? 1 : 0, counted);
+    star_api_log_to_file(buf);
+    Con_Printf("OQuake STAR: %s\n", buf);
+
+    if (!counted)
+        return;
+    /* Dedupe: same entity can be seen from pr_cmds.c and again inside ED_Free in same frame. */
+    if (ed == s_last_counted_ed && host_framecount == s_last_counted_frame)
+        return;
+    s_last_counted_ed = ed;
+    s_last_counted_frame = host_framecount;
+
+    Con_Printf("OQuake STAR: monster freed: %s (queuing XP/mint)\n", ed_classname);
+    snprintf(buf, sizeof(buf), "OQUAKE: monster freed: %s (queuing XP/mint)", ed_classname);
+    star_api_log_to_file(buf);
     OQuake_STAR_OnMonsterKilled(ed_classname);
 }
 
