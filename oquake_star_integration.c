@@ -285,6 +285,11 @@ static void OQ_AppendGameSourceTag(const oquake_inventory_entry_t* item, char* l
     const char* gs;
     if (!item || !label || label_size < 2)
         return;
+    /* Monster items have game in the name (e.g. "Dog (OQUAKE)"); don't append again. Also skip if already present. */
+    if (item->item_type[0] != '\0' && strstr(item->item_type, "Monster"))
+        return;
+    if (strstr(label, " (OQUAKE)") || strstr(label, " (ODOOM)"))
+        return;
     gs = item->game_source;
     if (!gs || !gs[0])
         return;
