@@ -87,11 +87,12 @@ static char g_star_last_pickup_desc[512] = {0};
 static char g_star_last_pickup_type[64] = {0};
 static qboolean g_star_has_last_pickup = false;
 
-/* key binding helpers from keys.c */
+/* key binding helpers from keys.c; key_message, key_console, key_menu are enum constants from keys.h */
 extern char *keybindings[MAX_KEYS];
 extern qboolean keydown[MAX_KEYS];
 extern int Key_StringToKeynum(const char *str);
 extern void Key_SetBinding(int keynum, const char *binding);
+extern int key_dest;
 
 cvar_t oasis_star_anorak_face = {"oasis_star_anorak_face", "0", 0}; /* Runtime state - not archived */
 cvar_t oasis_star_beam_face = {"oasis_star_beam_face", "1", CVAR_ARCHIVE};
@@ -223,12 +224,23 @@ static char g_inventory_saved_all_binds[MAX_KEYS][128];
 static char g_oq_use_pending_name[256];
 static char g_oq_use_pending_type[64];
 static char g_oq_use_pending_description[512];
+/* When we apply health/armor from overlay (use-item), set these so OnStatsChangedEx does not re-add the same item (sync/refresh would otherwise add +1 again). */
+static double g_oq_health_applied_from_overlay_time = 0.0;
+static double g_oq_armor_applied_from_overlay_time = 0.0;
+/* Toast message at top center (like ODOOM): show when C/F at max or use from overlay at max. Frames ~105 = ~3 sec at 35 fps. */
+#define OQ_TOAST_FRAMES_DEFAULT 105
+static char g_oq_toast_message[256] = "";
+static int g_oq_toast_frames = 0;
+/* Quest popup (Q key), same as ODOOM. */
+static qboolean g_quest_popup_open = false;
+static qboolean g_quest_key_was_down = false;
 static int star_initialized(void);
 static int OQ_ItemMatchesTab(const oquake_inventory_entry_t* item, int tab);
 static void OQ_RefreshInventoryCache(void);
 static void OQ_RefreshOverlayFromClient(void);
 static void OQ_ClampSelection(int filtered_count);
 static void OQ_OnUseItemFromOverlayDone(void* user_data);
+static void OQ_SetToastMessage(const char* msg);
 static void OQ_UseHealth_f(void);
 static void OQ_UseArmor_f(void);
 static void OQ_ApplyBeamFacePreference(void);
@@ -609,9 +621,9 @@ static int OQ_WouldUseExceedMax(const char* name, const char* type, const char* 
     amount_from_desc = OQ_ParseAmountFromDescription(description);
     {
         int is_health = type && (OQ_ContainsNoCase(type, "health") || OQ_ContainsNoCase(type, "powerup"));
-        int is_health_item = name && (OQ_ContainsNoCase(name, "Megahealth") || OQ_ContainsNoCase(name, "Health"));
+        int is_health_item = name && (OQ_ContainsNoCase(name, "Megahealth") || OQ_ContainsNoCase(name, "Health") || OQ_ContainsNoCase(name, "Stimpack"));
         if (is_health && is_health_item) {
-            int amount = (amount_from_desc >= 0) ? amount_from_desc : (OQ_ContainsNoCase(name, "Mega") ? 100 : 25);
+            int amount = (amount_from_desc >= 0) ? amount_from_desc : (OQ_ContainsNoCase(name, "Mega") ? 100 : (OQ_ContainsNoCase(name, "Stimpack") ? 10 : 25));
             if (cur_h >= max_h) { *toast_msg = "You cannot use this because you are already at max health."; return 1; }
             if (cur_h + amount > max_h) { *toast_msg = "You cannot use this because you are already at max health."; return 1; }
         }
@@ -638,11 +650,12 @@ static void OQ_ApplyHealthOrArmor(const char* name, const char* type, const char
         max_a = atoi(oquake_star_max_armor.string);
     {
         int is_health = type && (OQ_ContainsNoCase(type, "health") || OQ_ContainsNoCase(type, "powerup"));
-        int is_health_item = name && (OQ_ContainsNoCase(name, "Megahealth") || OQ_ContainsNoCase(name, "Health"));
+        int is_health_item = name && (OQ_ContainsNoCase(name, "Megahealth") || OQ_ContainsNoCase(name, "Health") || OQ_ContainsNoCase(name, "Stimpack"));
         if (is_health && is_health_item) {
-            amount = (amount_from_desc >= 0) ? amount_from_desc : (OQ_ContainsNoCase(name, "Mega") ? 100 : 25);
+            amount = (amount_from_desc >= 0) ? amount_from_desc : (OQ_ContainsNoCase(name, "Mega") ? 100 : (OQ_ContainsNoCase(name, "Stimpack") ? 10 : 25));
             cl.stats[STAT_HEALTH] += amount;
             if (cl.stats[STAT_HEALTH] > max_h) cl.stats[STAT_HEALTH] = max_h;
+            g_oq_health_applied_from_overlay_time = realtime;
         }
     }
     {
@@ -651,6 +664,7 @@ static void OQ_ApplyHealthOrArmor(const char* name, const char* type, const char
             amount = (amount_from_desc >= 0) ? amount_from_desc : ((name && (OQ_ContainsNoCase(name, "Red") || OQ_ContainsNoCase(name, "Mega"))) ? 200 : 100);
             cl.stats[STAT_ARMOR] += amount;
             if (cl.stats[STAT_ARMOR] > max_a) cl.stats[STAT_ARMOR] = max_a;
+            g_oq_armor_applied_from_overlay_time = realtime;
         }
     }
 }
@@ -701,6 +715,7 @@ static void OQ_UseSelectedItem(void)
     }
     /* Health/Armor: check max first; toast if already at max, else use and apply. Use description "(+X)" for amount. */
     if (OQ_WouldUseExceedMax(item->name, item->item_type, item->description, &toast_msg)) {
+        OQ_SetToastMessage(toast_msg ? toast_msg : "You cannot use this because you are already at max health or armor.");
         if (toast_msg)
             q_strlcpy(g_inventory_status, toast_msg, sizeof(g_inventory_status));
         return;
@@ -718,16 +733,16 @@ static void OQ_UseSelectedItem(void)
     q_snprintf(g_inventory_status, sizeof(g_inventory_status), "Using: %s...", item->name);
 }
 
-/** First health item in g_inventory_entries (Health or Megahealth). Returns NULL if none. */
+/** First health item in g_inventory_entries (Health, Megahealth, or Stimpack). Returns NULL if none. */
 static const oquake_inventory_entry_t* OQ_FindFirstHealthEntry(void) {
     int i;
     for (i = 0; i < g_inventory_count; i++) {
         const oquake_inventory_entry_t* e = &g_inventory_entries[i];
-        if (OQ_ItemMatchesTab(e, OQ_TAB_POWERUPS) && e->name && (OQ_ContainsNoCase(e->name, "Megahealth") || OQ_ContainsNoCase(e->name, "Health")))
+        if (OQ_ItemMatchesTab(e, OQ_TAB_POWERUPS) && e->name && (OQ_ContainsNoCase(e->name, "Megahealth") || OQ_ContainsNoCase(e->name, "Health") || OQ_ContainsNoCase(e->name, "Stimpack")))
             return e;
         if (e->item_type && OQ_ContainsNoCase(e->item_type, "health"))
             return e;
-        if (e->name && OQ_ContainsNoCase(e->name, "Health") && !OQ_ItemMatchesTab(e, OQ_TAB_ARMOR))
+        if (e->name && (OQ_ContainsNoCase(e->name, "Health") || OQ_ContainsNoCase(e->name, "Stimpack")) && !OQ_ItemMatchesTab(e, OQ_TAB_ARMOR))
             return e;
     }
     return NULL;
@@ -743,6 +758,13 @@ static const oquake_inventory_entry_t* OQ_FindFirstArmorEntry(void) {
     return NULL;
 }
 
+/** Set toast message for on-screen display (like ODOOM). Shows at top center for ~3 seconds. */
+static void OQ_SetToastMessage(const char* msg) {
+    if (!msg || !msg[0]) return;
+    q_strlcpy(g_oq_toast_message, msg, sizeof(g_oq_toast_message));
+    g_oq_toast_frames = OQ_TOAST_FRAMES_DEFAULT;
+}
+
 static void OQ_UseHealth_f(void) {
     const char* toast_msg = NULL;
     OQ_StarDebugLog("UseHealth (C key): invoked");
@@ -752,6 +774,7 @@ static void OQ_UseHealth_f(void) {
     const oquake_inventory_entry_t* item = OQ_FindFirstHealthEntry();
     if (!item) { Con_Printf("No health item in STAR inventory.\n"); OQ_StarDebugLog("UseHealth: no health item found (g_inventory_count=%d)", g_inventory_count); return; }
     if (OQ_WouldUseExceedMax(item->name, item->item_type, item->description, &toast_msg)) {
+        OQ_SetToastMessage(toast_msg ? toast_msg : "You cannot use this because you are already at max health.");
         Con_Printf("%s\n", toast_msg ? toast_msg : "Already at max health.");
         OQ_StarDebugLog("UseHealth: blocked (would exceed max) msg='%s'", toast_msg ? toast_msg : "");
         return;
@@ -773,6 +796,7 @@ static void OQ_UseArmor_f(void) {
     const oquake_inventory_entry_t* item = OQ_FindFirstArmorEntry();
     if (!item) { Con_Printf("No armor item in STAR inventory.\n"); OQ_StarDebugLog("UseArmor: no armor item found (g_inventory_count=%d)", g_inventory_count); return; }
     if (OQ_WouldUseExceedMax(item->name, item->item_type, item->description, &toast_msg)) {
+        OQ_SetToastMessage(toast_msg ? toast_msg : "You cannot use this because you are already at max armor.");
         Con_Printf("%s\n", toast_msg ? toast_msg : "Already at max armor.");
         OQ_StarDebugLog("UseArmor: blocked (would exceed max) msg='%s'", toast_msg ? toast_msg : "");
         return;
@@ -993,6 +1017,10 @@ static void OQ_RefreshInventoryCache(void) {
     }
     /* Always refresh overlay (get_inventory returns API + pending from C#). */
     OQ_RefreshOverlayFromClient();
+}
+
+static void OQ_QuestToggle_f(void) {
+    g_quest_popup_open = !g_quest_popup_open;
 }
 
 static void OQ_InventoryToggle_f(void) {
@@ -1768,6 +1796,13 @@ void OQuake_STAR_Init(void) {
             if (kn >= 0 && kn < MAX_KEYS && (!keybindings[kn] || !keybindings[kn][0]))
                 Key_SetBinding(kn, "oasis_inventory_toggle");
         }
+        /* Q = quest popup (like ODOOM) */
+        Cmd_AddCommand("oquake_quest_toggle", OQ_QuestToggle_f);
+        {
+            int kq = Key_StringToKeynum("q");
+            if (kq >= 0 && kq < MAX_KEYS && (!keybindings[kq] || !keybindings[kq][0]))
+                Key_SetBinding(kq, "oquake_quest_toggle");
+        }
         /* C = use health, F = use armor (like ODOOM) */
         {
             int kc = Key_StringToKeynum("c");
@@ -2522,28 +2557,38 @@ void OQuake_STAR_OnStatsChangedEx(
         added += OQ_AddInventoryEvent("Cells", desc, "Ammo");
         OQ_PickupLog("Stats: Cells +%d -> STAR", new_cells - old_cells);
     }
-    /* Armor: add 1 qty with description e.g. "Green Armor (+100)" so use-item applies correct amount. */
+    /* Armor: add 1 qty with description e.g. "Green Armor (+100)" so use-item applies correct amount. Skip if we just applied armor from overlay (would re-add and qty bounces). */
     if (new_armor > old_armor) {
-        int delta = new_armor - old_armor;
-        const char* armor_name = (delta <= 100) ? "Green Armor" : (delta < 200) ? "Yellow Armor" : "Red Armor";
-        q_snprintf(desc, sizeof(desc), "%s (+%d)", armor_name, delta);
-        star_api_queue_add_item(armor_name, desc, "Quake", "Armor", NULL, 1, 1);
-        added++;
-        OQ_PickupLog("Stats: Armor +%d (%s) -> STAR", delta, armor_name);
-    }
-    /* Health: add 1 qty with description e.g. "Health (+25)" or "Megahealth (+100)". */
-    if (new_health > old_health) {
-        int delta = new_health - old_health;
-        if (delta >= 100) {
-            q_snprintf(desc, sizeof(desc), "Megahealth (+%d)", delta);
-            star_api_queue_add_item("Megahealth", desc, "Quake", "Powerup", NULL, 1, 1);
-            OQ_PickupLog("Stats: Megahealth +%d -> STAR", delta);
+        extern double realtime;
+        if (realtime - g_oq_armor_applied_from_overlay_time >= 1.0) {
+            int delta = new_armor - old_armor;
+            const char* armor_name = (delta <= 100) ? "Green Armor" : (delta < 200) ? "Yellow Armor" : "Red Armor";
+            q_snprintf(desc, sizeof(desc), "%s (+%d)", armor_name, delta);
+            star_api_queue_add_item(armor_name, desc, "Quake", "Armor", NULL, 1, 1);
+            added++;
+            OQ_PickupLog("Stats: Armor +%d (%s) -> STAR", delta, armor_name);
         } else {
-            q_snprintf(desc, sizeof(desc), "Health (+%d)", delta);
-            star_api_queue_add_item("Health", desc, "Quake", "Health", NULL, 1, 1);
-            OQ_PickupLog("Stats: Health +%d -> STAR", delta);
+            OQ_PickupLog("Stats: Armor +%d skip (applied from overlay recently)", new_armor - old_armor);
         }
-        added++;
+    }
+    /* Health: add 1 qty with description e.g. "Health (+25)" or "Megahealth (+100)". Skip if we just applied health from overlay (would re-add and qty bounces). */
+    if (new_health > old_health) {
+        extern double realtime;
+        if (realtime - g_oq_health_applied_from_overlay_time >= 1.0) {
+            int delta = new_health - old_health;
+            if (delta >= 100) {
+                q_snprintf(desc, sizeof(desc), "Megahealth (+%d)", delta);
+                star_api_queue_add_item("Megahealth", desc, "Quake", "Powerup", NULL, 1, 1);
+                OQ_PickupLog("Stats: Megahealth +%d -> STAR", delta);
+            } else {
+                q_snprintf(desc, sizeof(desc), "Health (+%d)", delta);
+                star_api_queue_add_item("Health", desc, "Quake", "Health", NULL, 1, 1);
+                OQ_PickupLog("Stats: Health +%d -> STAR", delta);
+            }
+            added++;
+        } else {
+            OQ_PickupLog("Stats: Health +%d skip (applied from overlay recently)", new_health - old_health);
+        }
     }
 
     if (added > 0) {
@@ -2638,6 +2683,15 @@ int OQuake_STAR_InterceptTouchPickupAtMax(void* item_edict, void* player_edict) 
         OQ_PickupLog("InterceptTouch: e1=%p e2=%p (null check)", (void*)e1, (void*)e2);
         return 0;
     }
+    /* Always log when touch involves health pickup so we can see if intercept is called at 100% health. */
+    {
+        const char* c1 = PR_GetString(e1->v.classname);
+        const char* c2 = PR_GetString(e2->v.classname);
+        if ((c1 && (OQ_StrEqNoCase(c1, "item_health") || OQ_StrEqNoCase(c1, "item_health_mega") || OQ_StrEqNoCase(c1, "item_health_super"))) ||
+            (c2 && (OQ_StrEqNoCase(c2, "item_health") || OQ_StrEqNoCase(c2, "item_health_mega") || OQ_StrEqNoCase(c2, "item_health_super")))) {
+            Con_Printf("[OQuake STAR] InterceptTouch HEALTH touch: e1=%s e2=%s\n", c1 ? c1 : "?", c2 ? c2 : "?");
+        }
+    }
     if (!g_star_initialized || !g_star_beamed_in) {
         OQ_PickupLog("InterceptTouch: skip (init=%d beamed=%d)", g_star_initialized, g_star_beamed_in);
         return 0;
@@ -2668,6 +2722,10 @@ int OQuake_STAR_InterceptTouchPickupAtMax(void* item_edict, void* player_edict) 
     if (!classname || !classname[0]) {
         OQ_PickupLog("InterceptTouch: item classname empty");
         return 0;
+    }
+    /* Always log when we see a health pickup touch so we can confirm intercept is called at 100% health. */
+    if (OQ_StrEqNoCase(classname, "item_health")) {
+        Con_Printf("[OQuake STAR] Touch: item_health, player_health=%d max_h=%d\n", (int)player->v.health, max_h);
     }
     if (oquake_star_always_add_items_to_inventory.string && atoi(oquake_star_always_add_items_to_inventory.string))
         always_add = 1;
@@ -2913,6 +2971,9 @@ void OQuake_STAR_PollItems(void) {
     } else if (g_oq_reapply_json_frames > 0) {
         g_oq_reapply_json_frames--;
     }
+
+    if (g_oq_toast_frames > 0)
+        g_oq_toast_frames--;
 
     /* XP refresh is done once in auth-done or API-key path; no delayed second call. */
 
@@ -3611,15 +3672,34 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
 
     if (!g_star_initialized || !cbx)
         return;
+    /* Draw toast first every frame (so it shows when C/F or E at max even if overlay is closed) */
+    OQuake_STAR_DrawToast(cbx);
     /* Check if background operations completed */
     OQ_CheckAuthenticationComplete();
     OQ_CheckInventoryRefreshComplete();
-    
-    OQ_PollInventoryHotkeys();
 
-    if (!g_inventory_open)
+    /* Q key: edge-triggered toggle for quest popup (same pattern as I for inventory - poll in draw path so it works regardless of binding) */
+    {
+        static int s_q_key = -1;
+        if (s_q_key < 0)
+            s_q_key = Key_StringToKeynum("q");
+        if (s_q_key >= 0 && s_q_key < MAX_KEYS && key_dest != key_message && key_dest != key_console && key_dest != key_menu) {
+            if (keydown[s_q_key] && !g_quest_key_was_down) {
+                g_quest_popup_open = !g_quest_popup_open;
+                g_quest_key_was_down = true;
+            }
+            if (!keydown[s_q_key])
+                g_quest_key_was_down = false;
+        }
+    }
+
+    if (g_inventory_open)
+        OQ_PollInventoryHotkeys();
+
+    if (!g_inventory_open && !g_quest_popup_open)
         return;
 
+    if (g_inventory_open) {
     /* Refresh list from client every frame while overlay is open (merge is in-memory, so pickups show immediately). */
     OQ_RefreshOverlayFromClient();
 
@@ -3728,6 +3808,75 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
             Draw_Fill(cbx, popup_x + 84, popup_y + 78, 72, 10, 224, 0.65f);
         Draw_String(cbx, popup_x + 92, popup_y + 79, "CANCEL");
     }
+    } /* end if (g_inventory_open) */
+
+    /* Quest popup (Q key), same as ODOOM */
+    if (g_quest_popup_open) {
+        static char quest_buf[4096];
+        int n = star_api_get_quests_string(quest_buf, sizeof(quest_buf));
+        int qw = q_min(glwidth - 48, 500);
+        int qh = q_min(glheight - 96, 320);
+        int qx = (glwidth - qw) / 2;
+        int qy = (glheight - qh) / 2;
+        if (qx < 0) qx = 0;
+        if (qy < 0) qy = 0;
+        Draw_Fill(cbx, qx, qy, qw, qh, 0, 0.75f);
+        Draw_String(cbx, qx + (qw - 6*8) / 2, qy + 6, "QUESTS");
+        Draw_String(cbx, qx + 6, qy + qh - 14, "Q = Close");
+        if (n > 0 && quest_buf[0]) {
+            int dy = qy + 24;
+            char* p = quest_buf;
+            char* end = p + n;
+            while (p < end && dy < qy + qh - 24) {
+                char* eol = p;
+                while (eol < end && *eol != '\n' && *eol != '\0') eol++;
+                if (p < eol) {
+                    if (eol - p >= 2 && p[0] == 'Q' && p[1] == '\t') {
+                        /* Tab-separated: Q, id, name, desc, status, pct. Show name (2nd field). */
+                        char name[128];
+                        const char* f = p + 2;
+                        const char* tab1 = (const char*)memchr(f, '\t', (size_t)(eol - f));
+                        if (tab1 && tab1 < eol) {
+                            const char* name_start = tab1 + 1;
+                            const char* tab2 = (const char*)memchr(name_start, '\t', (size_t)(eol - name_start));
+                            const char* name_end = tab2 ? tab2 : eol;
+                            int len = (int)(name_end - name_start);
+                            if (len > 0 && len < (int)sizeof(name)) {
+                                memcpy(name, name_start, (size_t)len);
+                                name[len] = '\0';
+                                Draw_String(cbx, qx + 10, dy, name);
+                                dy += 10;
+                            }
+                        } else {
+                            q_strlcpy(name, f, sizeof(name));
+                            Draw_String(cbx, qx + 10, dy, name);
+                            dy += 10;
+                        }
+                    } else if (eol - p >= 2 && p[0] == 'O' && p[1] == '\t') {
+                        /* O, id, desc, done. Show desc (2nd field). */
+                        char obj[128];
+                        const char* f = p + 2;
+                        const char* tab1 = (const char*)memchr(f, '\t', (size_t)(eol - f));
+                        if (tab1 && tab1 < eol) {
+                            const char* desc_start = tab1 + 1;
+                            const char* tab2 = (const char*)memchr(desc_start, '\t', (size_t)(eol - desc_start));
+                            const char* desc_end = tab2 ? tab2 : eol;
+                            int len = (int)(desc_end - desc_start);
+                            if (len > 0 && len < (int)sizeof(obj)) {
+                                memcpy(obj, desc_start, (size_t)len);
+                                obj[len] = '\0';
+                                Draw_String(cbx, qx + 18, dy, obj);
+                                dy += 8;
+                            }
+                        }
+                    }
+                }
+                p = eol + (eol < end && *eol == '\n' ? 1 : 0);
+            }
+        } else {
+            Draw_String(cbx, qx + 10, qy + 24, "No active quests.");
+        }
+    }
 }
 
 void OQuake_STAR_DrawBeamedInStatus(cb_context_t* cbx) {
@@ -3795,6 +3944,20 @@ void OQuake_STAR_DrawXpStatus(cb_context_t* cbx) {
     y = 12;
     if (x < 8) x = 8;
     Draw_String(cbx, x, y, buf);
+}
+
+void OQuake_STAR_DrawToast(cb_context_t* cbx) {
+    extern int glwidth, glheight;
+    int len, x, y;
+
+    if (!cbx || glwidth <= 0 || glheight <= 0 || g_oq_toast_frames <= 0 || !g_oq_toast_message[0])
+        return;
+    len = (int)strlen(g_oq_toast_message);
+    if (len <= 0) return;
+    x = (glwidth - len * 8) / 2;
+    if (x < 8) x = 8;
+    y = 12;
+    Draw_String(cbx, x, y, g_oq_toast_message);
 }
 
 int OQuake_STAR_ShouldUseAnorakFace(void) {
