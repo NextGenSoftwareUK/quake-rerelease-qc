@@ -4063,7 +4063,7 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
             int idx;
             qboolean sel;
             int col1_x, col2_x, col3_x;
-            int col1_chars = 48;  /* name column ~50px wider than before (48*8 = 384px) */
+            int col1_chars = 54;  /* name column ~50px wider again (54*8 = 432px) */
             int col2_chars = 6;
             dy = qy + 48;  /* space below toggles */
             row_h = 12;
@@ -4126,7 +4126,7 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
         if (g_quest_status_frames > 0 && g_quest_status_message[0]) {
             int status_len = (int)strlen(g_quest_status_message);
             int status_x = qx + qw - (status_len * 8) - 8;
-            int status_y = qy + qh - 26;  /* 10px higher than qh - 16 */
+            int status_y = qy + qh - 36;  /* 10px higher than previous (qh - 26) */
             if (status_x < qx + 8) status_x = qx + 8;
             Draw_String(cbx, status_x, status_y, g_quest_status_message);
             g_quest_status_frames--;
