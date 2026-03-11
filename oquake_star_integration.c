@@ -4227,17 +4227,30 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
                 dy += row_h;
             }
 
-            /* Right panel: description (top), prerequisites, sub-quests/objectives */
+            /* Right panel: fixed layout – desc = top half, prereq = next quarter (starts 1/2 down), subquest = bottom quarter (starts 3/4 down). Lists scroll within their fixed height. */
             int rx = qx + list_left_w + 20;
             int rw = qw - list_left_w - 30;
-            int ry = qy + 48;
-            if (sel_quest_idx >= 0 && sel_quest_idx < q_count && rx + rw <= qx + qw) {
-                int line_h = 10;
-                int desc_max_lines = 18;   /* tripled from 6 so right panel uses max height */
-                const char* desc_text = q_desc[sel_quest_idx][0] ? q_desc[sel_quest_idx] : "(No description)";
+            int right_panel_top = qy + 48;
+            int right_panel_height = qh - 48 - 40;  /* content area above footer */
+            if (right_panel_height < 0) right_panel_height = 0;
+            int desc_height = right_panel_height / 2;           /* description = first half */
+            int quarter_height = right_panel_height / 4;       /* each list section = quarter */
+            int line_h = 10;
+            int desc_max_lines = desc_height / line_h;
+            if (desc_max_lines < 1) desc_max_lines = 1;
+            int pr_list_height = quarter_height - (line_h + 2);  /* after header */
+            if (pr_list_height < 0) pr_list_height = 0;
+            int pr_vis = pr_list_height / line_h;
+            if (pr_vis < 0) pr_vis = 0;
+            int sq_vis = pr_vis;  /* same fixed height for subquest list */
+
+            if (rx + rw <= qx + qw) {
+                /* Description: top half of right panel (fixed height) */
+                int ry = right_panel_top;
+                const char* desc_text = (sel_quest_idx >= 0 && sel_quest_idx < q_count && q_desc[sel_quest_idx][0]) ? q_desc[sel_quest_idx] : "(No description)";
                 int chars_per_line = rw / 8;
                 if (chars_per_line < 10) chars_per_line = 10;
-                { /* word-wrap description */
+                {
                     const char* p = desc_text;
                     int line_num = 0;
                     char line_buf[128];
@@ -4253,28 +4266,21 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
                         line_num++;
                     }
                 }
-                ry += desc_max_lines * line_h + 8;
 
-                /* Right panel: split remaining height (below desc, above footer) between prereq and subquest lists */
-                int right_content_top = ry;
-                int right_available = qh - (right_content_top - qy) - 40;  /* 40 for footer */
-                int list_section_h = (right_available - 20 - (line_h + 2) * 2) / 2;  /* gap + 2 headers, half each */
-                if (list_section_h < 0) list_section_h = 0;
-                int pr_vis = list_section_h / line_h;
-                int sq_vis = list_section_h / line_h;
-
+                /* Prerequisites: starts halfway down popup (second quarter), fixed height, scroll within */
+                ry = right_panel_top + desc_height;
                 Draw_String(cbx, rx, ry, "Prerequisites (Enter=select in list)");
                 ry += line_h + 2;
                 if (n_prereq == 0)
                     Draw_String(cbx, rx, ry, "(none)");
                 else {
-                    if (pr_vis > n_prereq) pr_vis = n_prereq;
-                    if (pr_vis < 0) pr_vis = 0;
+                    int pr_vis_use = pr_vis;
+                    if (pr_vis_use > n_prereq) pr_vis_use = n_prereq;
                     if (g_quest_prereq_selected < g_quest_prereq_scroll) g_quest_prereq_scroll = g_quest_prereq_selected;
-                    if (g_quest_prereq_selected >= g_quest_prereq_scroll + pr_vis && pr_vis > 0) g_quest_prereq_scroll = g_quest_prereq_selected - pr_vis + 1;
-                    if (g_quest_prereq_scroll + pr_vis > n_prereq) g_quest_prereq_scroll = n_prereq - pr_vis;
+                    if (g_quest_prereq_selected >= g_quest_prereq_scroll + pr_vis_use && pr_vis_use > 0) g_quest_prereq_scroll = g_quest_prereq_selected - pr_vis_use + 1;
+                    if (g_quest_prereq_scroll + pr_vis_use > n_prereq) g_quest_prereq_scroll = n_prereq - pr_vis_use;
                     if (g_quest_prereq_scroll < 0) g_quest_prereq_scroll = 0;
-                    for (i = 0; i < pr_vis && g_quest_prereq_scroll + i < n_prereq; i++) {
+                    for (i = 0; i < pr_vis_use && g_quest_prereq_scroll + i < n_prereq; i++) {
                         int pi = g_quest_prereq_scroll + i;
                         int qi;
                         const char* pr_name = "(unknown)";
@@ -4290,19 +4296,21 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
                         ry += line_h;
                     }
                 }
-                ry += 20;  /* space between the two right lists */
+
+                /* Sub-quests / Objectives: starts 3/4 down popup (fourth quarter), fixed height, scroll within */
+                ry = right_panel_top + desc_height + quarter_height;
                 Draw_String(cbx, rx, ry, "Sub-quests / Objectives");
                 ry += line_h + 2;
                 if (n_subquest_list == 0)
                     Draw_String(cbx, rx, ry, "(none)");
                 else {
-                    if (sq_vis > n_subquest_list) sq_vis = n_subquest_list;
-                    if (sq_vis < 0) sq_vis = 0;
+                    int sq_vis_use = sq_vis;
+                    if (sq_vis_use > n_subquest_list) sq_vis_use = n_subquest_list;
                     if (g_quest_subquest_selected < g_quest_subquest_scroll) g_quest_subquest_scroll = g_quest_subquest_selected;
-                    if (g_quest_subquest_selected >= g_quest_subquest_scroll + sq_vis && sq_vis > 0) g_quest_subquest_scroll = g_quest_subquest_selected - sq_vis + 1;
-                    if (g_quest_subquest_scroll + sq_vis > n_subquest_list) g_quest_subquest_scroll = n_subquest_list - sq_vis;
+                    if (g_quest_subquest_selected >= g_quest_subquest_scroll + sq_vis_use && sq_vis_use > 0) g_quest_subquest_scroll = g_quest_subquest_selected - sq_vis_use + 1;
+                    if (g_quest_subquest_scroll + sq_vis_use > n_subquest_list) g_quest_subquest_scroll = n_subquest_list - sq_vis_use;
                     if (g_quest_subquest_scroll < 0) g_quest_subquest_scroll = 0;
-                    for (i = 0; i < sq_vis && g_quest_subquest_scroll + i < n_subquest_list; i++) {
+                    for (i = 0; i < sq_vis_use && g_quest_subquest_scroll + i < n_subquest_list; i++) {
                         int si = g_quest_subquest_scroll + i;
                         char obj_buf[132];
                         q_snprintf(obj_buf, sizeof(obj_buf), "%s %s", q_obj_done[sel_quest_idx][si] ? "[x]" : "[ ]", q_obj_desc[sel_quest_idx][si]);
