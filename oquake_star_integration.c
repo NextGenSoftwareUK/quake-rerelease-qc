@@ -3884,7 +3884,7 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
     }
     } /* end if (g_inventory_open) */
 
-    /* Quest popup (Q key): filter by status (1/2/3), list nav (Home/End/PgUp/PgDn), selection (Up/Down), Enter = Start or Set tracker. */
+    /* Quest popup (Q key): filter by status (B/N/M), list nav (Home/End/PgUp/PgDn), selection (Up/Down), Enter = Start or Set tracker. */
     if (g_quest_popup_open) {
         static char quest_buf[16384];
         static char q_id[OQ_QUEST_MAX][64];
@@ -4225,13 +4225,13 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
         }
         /* Toggles: 1=Not Started, 2=In Progress, 3=Completed */
         {
-            static int s_k1 = -2, s_k2 = -2, s_k3 = -2;
-            if (s_k1 == -2) s_k1 = Key_StringToKeynum("1"); if (s_k1 < 0) s_k1 = '1';
-            if (s_k2 == -2) s_k2 = Key_StringToKeynum("2"); if (s_k2 < 0) s_k2 = '2';
-            if (s_k3 == -2) s_k3 = Key_StringToKeynum("3"); if (s_k3 < 0) s_k3 = '3';
-            if (OQ_KeyPressed(s_k1)) g_quest_filter_not_started = !g_quest_filter_not_started;
-            if (OQ_KeyPressed(s_k2)) g_quest_filter_in_progress = !g_quest_filter_in_progress;
-            if (OQ_KeyPressed(s_k3)) g_quest_filter_completed = !g_quest_filter_completed;
+            static int s_kb = -2, s_kn = -2, s_km = -2;
+            if (s_kb == -2) s_kb = Key_StringToKeynum("b"); if (s_kb < 0) s_kb = 'b';
+            if (s_kn == -2) s_kn = Key_StringToKeynum("n"); if (s_kn < 0) s_kn = 'n';
+            if (s_km == -2) s_km = Key_StringToKeynum("m"); if (s_km < 0) s_km = 'm';
+            if (OQ_KeyPressed(s_kb)) g_quest_filter_not_started = !g_quest_filter_not_started;
+            if (OQ_KeyPressed(s_kn)) g_quest_filter_in_progress = !g_quest_filter_in_progress;
+            if (OQ_KeyPressed(s_km)) g_quest_filter_completed = !g_quest_filter_completed;
         }
         /* List navigation: Home=first, End=last, PgUp/PgDn=one screen */
         if (g_quest_focus == OQ_QUEST_FOCUS_MAIN && q_filtered_count > 0) {
@@ -4454,7 +4454,7 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
 
         /* Bottom info text centre-aligned */
         {
-            const char* footer = "1/2/3=Filter  Space=Switch  PgUp/PgDn=Page  Home/End=Top/Bottom  Enter=Start/Set  Q=Close";
+            const char* footer = "B/N/M=Filter  Space=Switch  PgUp/PgDn=Page  Home/End=Top/Bottom  Enter=Start/Set  Q=Close";
             int footer_len = (int)strlen(footer);
             Draw_String(cbx, qx + (qw - footer_len * 8) / 2, qy + qh - 20, footer);
         }
