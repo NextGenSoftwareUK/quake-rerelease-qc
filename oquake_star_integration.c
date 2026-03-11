@@ -4057,18 +4057,23 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
         int n_obj = (sel_quest_idx >= 0 && sel_quest_idx < q_count) ? q_obj_count[sel_quest_idx] : 0;
         int n_subquest_list = n_obj;  /* sub-quests = objectives (same thing) */
 
-        /* Key handling: Tab cycles focus Tab cycles focus (main -> prereq -> subquest -> main); Up/Down/Enter act on focused panel */
+        /* Key handling: Space switches between main list and right-side lists (only if at least one has content); Up/Down/Enter act on focused panel */
         {
-            static int s_enter_key = -2, s_kp_enter_key = -2, s_tab_key = -2;
+            static int s_enter_key = -2, s_kp_enter_key = -2, s_space_key = -2;
             if (s_enter_key == -2) s_enter_key = Key_StringToKeynum("enter");
             if (s_kp_enter_key == -2) s_kp_enter_key = Key_StringToKeynum("kp_enter");
-            if (s_tab_key == -2) s_tab_key = Key_StringToKeynum("tab");
+            if (s_space_key == -2) s_space_key = Key_StringToKeynum("space");
             if (s_enter_key < 0) s_enter_key = K_ENTER;
             if (s_kp_enter_key < 0) s_kp_enter_key = K_KP_ENTER;
-            if (s_tab_key < 0) s_tab_key = K_TAB;
-            if (OQ_KeyPressed(s_tab_key)) {
-                g_quest_focus++;
-                if (g_quest_focus > OQ_QUEST_FOCUS_SUBQUEST) g_quest_focus = OQ_QUEST_FOCUS_MAIN;
+            if (s_space_key < 0) s_space_key = K_SPACE;
+            if (OQ_KeyPressed(s_space_key) && (n_prereq > 0 || n_obj > 0)) {
+                for (;;) {
+                    g_quest_focus++;
+                    if (g_quest_focus > OQ_QUEST_FOCUS_SUBQUEST) g_quest_focus = OQ_QUEST_FOCUS_MAIN;
+                    if (g_quest_focus == OQ_QUEST_FOCUS_MAIN) break;
+                    if (g_quest_focus == OQ_QUEST_FOCUS_PREREQ && n_prereq > 0) break;
+                    if (g_quest_focus == OQ_QUEST_FOCUS_SUBQUEST && n_obj > 0) break;
+                }
             }
             {
             int sidx = (g_quest_selected_index >= 0 && g_quest_selected_index < q_filtered_count) ? q_filtered_indices[g_quest_selected_index] : -1;
@@ -4141,7 +4146,7 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
         if (qw < 480) qw = 480;
         if (qh < 200) qh = 200;
         int qx = (glwidth - qw) / 2;
-        int qy = (glheight - qh) / 2;
+        int qy = (glheight - qh) / 2 - 20;  /* move popup up 20 pixels */
         if (qx < 0) qx = 0;
         if (qy < 0) qy = 0;
         Draw_Fill(cbx, qx, qy, qw, qh, 0, 0.75f);
@@ -4228,7 +4233,7 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
             int ry = qy + 48;
             if (sel_quest_idx >= 0 && sel_quest_idx < q_count && rx + rw <= qx + qw) {
                 int line_h = 10;
-                int desc_max_lines = 6;
+                int desc_max_lines = 18;   /* tripled from 6 so right panel uses max height */
                 const char* desc_text = q_desc[sel_quest_idx][0] ? q_desc[sel_quest_idx] : "(No description)";
                 int chars_per_line = rw / 8;
                 if (chars_per_line < 10) chars_per_line = 10;
@@ -4250,12 +4255,19 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
                 }
                 ry += desc_max_lines * line_h + 8;
 
+                /* Right panel: split remaining height (below desc, above footer) between prereq and subquest lists */
+                int right_content_top = ry;
+                int right_available = qh - (right_content_top - qy) - 40;  /* 40 for footer */
+                int list_section_h = (right_available - 20 - (line_h + 2) * 2) / 2;  /* gap + 2 headers, half each */
+                if (list_section_h < 0) list_section_h = 0;
+                int pr_vis = list_section_h / line_h;
+                int sq_vis = list_section_h / line_h;
+
                 Draw_String(cbx, rx, ry, "Prerequisites (Enter=select in list)");
                 ry += line_h + 2;
                 if (n_prereq == 0)
                     Draw_String(cbx, rx, ry, "(none)");
                 else {
-                    int pr_vis = (qh - (ry - qy) - 120) / line_h;
                     if (pr_vis > n_prereq) pr_vis = n_prereq;
                     if (pr_vis < 0) pr_vis = 0;
                     if (g_quest_prereq_selected < g_quest_prereq_scroll) g_quest_prereq_scroll = g_quest_prereq_selected;
@@ -4278,13 +4290,12 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
                         ry += line_h;
                     }
                 }
-                ry += 10;
+                ry += 20;  /* space between the two right lists */
                 Draw_String(cbx, rx, ry, "Sub-quests / Objectives");
                 ry += line_h + 2;
                 if (n_subquest_list == 0)
                     Draw_String(cbx, rx, ry, "(none)");
                 else {
-                    int sq_vis = (qh - (ry - qy) - 40) / line_h;
                     if (sq_vis > n_subquest_list) sq_vis = n_subquest_list;
                     if (sq_vis < 0) sq_vis = 0;
                     if (g_quest_subquest_selected < g_quest_subquest_scroll) g_quest_subquest_scroll = g_quest_subquest_selected;
@@ -4308,7 +4319,7 @@ void OQuake_STAR_DrawInventoryOverlay(cb_context_t* cbx) {
 
         /* Bottom info text centre-aligned */
         {
-            const char* footer = "Tab=Focus  Home/End/PgUp=Filter  Arrows=Select  Enter=Start/Set tracker  Q=Close";
+            const char* footer = "Space=Switch Lists  Home/End/PgUp=Filter  Arrows=Select  Enter=Start/Set tracker  Q=Close";
             int footer_len = (int)strlen(footer);
             Draw_String(cbx, qx + (qw - footer_len * 8) / 2, qy + qh - 20, footer);
         }
