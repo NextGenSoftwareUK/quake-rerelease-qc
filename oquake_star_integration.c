@@ -255,6 +255,11 @@ int OQuake_STAR_IsQuestPopupOpen(void)
     return g_quest_popup_open ? 1 : 0;
 }
 
+int OQuake_STAR_IsInventoryPopupOpen(void)
+{
+    return g_inventory_open ? 1 : 0;
+}
+
 #define OQ_QUEST_MAX 64
 #define OQ_LINKS_MAX 16   /* max prereq or sub-quest IDs per quest */
 #define OQ_OBJ_MAX 16    /* max objectives per quest */
