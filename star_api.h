@@ -49,6 +49,10 @@ typedef enum {
 
 typedef void (*star_api_callback_t)(star_api_result_t result, void* user_data);
 
+/** Operation type for star_api_set_operation_callback. Game can run "profile loaded" only when type is STAR_API_OP_PROFILE_LOADED. Other values (1-27) identify get_avatar_id, has_item, get_inventory, etc.; see StarApiClient.cs StarApiOp* constants. */
+#define STAR_API_OP_PROFILE_LOADED 0
+typedef void (*star_api_operation_callback_t)(star_api_result_t result, int operation_type, void* user_data);
+
 star_api_result_t star_api_init(const star_api_config_t* config);
 star_api_result_t star_api_authenticate(const char* username, const char* password);
 /* Set WEB4 OASIS API base URI (used for avatar auth + NFT mint endpoints). */
@@ -113,10 +117,16 @@ void star_api_queue_add_xp(int amount);
 void star_api_queue_monster_kill(const char* engine_name, const char* display_name, int xp, int is_boss, int do_mint, const char* provider, const char* game_source);
 /** Get last known avatar XP (from get-current-avatar or after add-xp). Returns 0 if not loaded. Write to *xp_out; pass NULL to skip. Returns 1 if value is valid, 0 otherwise. */
 int star_api_get_avatar_xp(int* xp_out);
-/** Refresh avatar XP from API (GET /api/avatar/current; server returns avatar with XP). Call once after beam-in. */
-void star_api_refresh_avatar_xp(void);
-/** Block until avatar XP is loaded from API. Call in auth-done callback before setting "beamed in" so HUD shows correct XP immediately. */
-void star_api_refresh_avatar_xp_blocking(void);
+/* REDUNDANT: removed. Use star_api_refresh_avatar_profile() only. */
+/* void star_api_refresh_avatar_xp(void); */
+/** Kick off avatar profile refresh (XP + quest/objective) in background; callback when done. Call on beam-in. */
+void star_api_refresh_avatar_profile(void);
+/** Get last active quest ID from avatar detail (restored after beam-in). Writes GUID string to buf, null-terminated. Returns 1 if had value, 0 otherwise. */
+int star_api_get_active_quest_id(char* buf, size_t buf_size);
+/** Get last active objective ID from avatar detail (restored after beam-in). Writes GUID string to buf, null-terminated. Returns 1 if had value, 0 otherwise. */
+int star_api_get_active_objective_id(char* buf, size_t buf_size);
+/** Persist active quest and objective on avatar detail. quest_id and objective_id can be NULL/empty to clear. Call when user sets tracker in game. */
+star_api_result_t star_api_set_active_quest(const char* quest_id, const char* objective_id);
 const char* star_api_get_last_error(void);
 /** Consume last mint result from background pickup-with-mint. Writes item name, NFT ID, and hash to buffers (null-terminated). Returns 1 if a result was available, 0 otherwise. Call from game pump/frame to show mint results in console. */
 #define STAR_API_HAS_CONSUME_LAST_MINT 1
@@ -131,6 +141,8 @@ void star_api_log_to_file(const char* message);
 /** Enable (1) or disable (0) STAR API debug logging in the client. When on, quest and other API requests log URI and response to star_api.log and console. Call when user toggles "star debug on|off". */
 void star_api_set_debug(int enabled);
 void star_api_set_callback(star_api_callback_t callback, void* user_data);
+/** Optional: set callback with operation_type so game only reacts to profile-loaded. If set, profile refresh uses this; else uses star_api_set_callback. */
+void star_api_set_operation_callback(star_api_operation_callback_t callback, void* user_data);
 
 #ifdef __cplusplus
 }
