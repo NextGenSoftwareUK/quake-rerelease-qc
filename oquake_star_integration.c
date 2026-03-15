@@ -1636,12 +1636,12 @@ static int OQ_LoadJsonConfig(const char *json_path) {
         Cvar_Set("oquake_star_send_to_address_after_minting", value);
         loaded = 1;
     }
-    /* Persisted session (do not put JWT in cvars; kept in static buffers for restore on next launch). */
-    if (OQ_ExtractJsonValue(json, "saved_username", value, sizeof(value)) && value[0]) {
+    /* Persisted session for autologin (beamedin_avatar + jwt_token). Fallback to old keys for compatibility. */
+    if ((OQ_ExtractJsonValue(json, "beamedin_avatar", value, sizeof(value)) || OQ_ExtractJsonValue(json, "saved_username", value, sizeof(value))) && value[0]) {
         q_strlcpy(g_oq_saved_username, value, sizeof(g_oq_saved_username));
         loaded = 1;
     }
-    if (OQ_ExtractJsonValue(json, "saved_jwt", value, sizeof(value)) && value[0]) {
+    if ((OQ_ExtractJsonValue(json, "jwt_token", value, sizeof(value)) || OQ_ExtractJsonValue(json, "saved_jwt", value, sizeof(value))) && value[0]) {
         q_strlcpy(g_oq_saved_jwt, value, sizeof(g_oq_saved_jwt));
         loaded = 1;
     }
@@ -1741,34 +1741,26 @@ static int OQ_SaveJsonConfig(const char *json_path) {
         }
         if (got_username) {
             q_strlcpy(g_oq_saved_username, uname, sizeof(g_oq_saved_username));
-            fprintf(f, ",\n  \"saved_username\": \"");
+            fprintf(f, ",\n  \"beamedin_avatar\": \"");
             { const char* p; for (p = uname; *p; p++) { if (*p == '"' || *p == '\\') fputc('\\', f); fputc((unsigned char)*p, f); } }
             fprintf(f, "\"");
         }
         if (star_api_get_current_jwt((char*)jwt, sizeof(jwt)) > 0 && jwt[0]) {
             q_strlcpy(g_oq_saved_jwt, jwt, sizeof(g_oq_saved_jwt));
-            fprintf(f, ",\n  \"saved_jwt\": \"");
+            fprintf(f, ",\n  \"jwt_token\": \"");
             { const char* p; for (p = jwt; *p; p++) { if (*p == '"' || *p == '\\') fputc('\\', f); fputc((unsigned char)*p, f); } }
             fprintf(f, "\"");
         }
     } else if (g_oq_saved_username[0] || g_oq_saved_jwt[0]) {
         /* Preserve existing saved session when saving config without STAR init (e.g. early exit). */
         if (g_oq_saved_username[0]) {
-            fprintf(f, ",\n  \"saved_username\": \"");
-            const char* p;
-            for (p = g_oq_saved_username; *p; p++) {
-                if (*p == '"' || *p == '\\') fputc('\\', f);
-                fputc((unsigned char)*p, f);
-            }
+            fprintf(f, ",\n  \"beamedin_avatar\": \"");
+            { const char* p; for (p = g_oq_saved_username; *p; p++) { if (*p == '"' || *p == '\\') fputc('\\', f); fputc((unsigned char)*p, f); } }
             fprintf(f, "\"");
         }
         if (g_oq_saved_jwt[0]) {
-            fprintf(f, ",\n  \"saved_jwt\": \"");
-            const char* p;
-            for (p = g_oq_saved_jwt; *p; p++) {
-                if (*p == '"' || *p == '\\') fputc('\\', f);
-                fputc((unsigned char)*p, f);
-            }
+            fprintf(f, ",\n  \"jwt_token\": \"");
+            { const char* p; for (p = g_oq_saved_jwt; *p; p++) { if (*p == '"' || *p == '\\') fputc('\\', f); fputc((unsigned char)*p, f); } }
             fprintf(f, "\"");
         }
     }
