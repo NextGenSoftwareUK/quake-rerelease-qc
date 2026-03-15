@@ -55,6 +55,14 @@ typedef void (*star_api_operation_callback_t)(star_api_result_t result, int oper
 
 star_api_result_t star_api_init(const star_api_config_t* config);
 star_api_result_t star_api_authenticate(const char* username, const char* password);
+/** Set JWT from persisted session (e.g. oasisstar.json). Call star_api_restore_session to validate and load profile. */
+star_api_result_t star_api_set_saved_session(const char* jwt);
+/** Start async session restore (GET avatar/current). Callback is invoked on success/failure. Does not block. */
+star_api_result_t star_api_restore_session(void);
+/** Write current username to buf for saving to oasisstar.json. Returns bytes written or 0. */
+int star_api_get_current_username(char* buf, size_t buf_size);
+/** Write current JWT to buf for saving to oasisstar.json. Returns bytes written or 0. Caller should not log. */
+int star_api_get_current_jwt(char* buf, size_t buf_size);
 /* Set WEB4 OASIS API base URI (used for avatar auth + NFT mint endpoints). */
 star_api_result_t star_api_set_oasis_base_url(const char* oasis_base_url);
 void star_api_cleanup(void);
@@ -85,6 +93,8 @@ star_api_result_t star_api_complete_quest(const char* quest_id);
 int star_api_get_quests_string(char* buf, size_t buf_size);
 /** Write serialized top-level quests only (no sub-quests) to buf for left list. Same format as star_api_get_quests_string. Use for main quest list so sub-quests do not appear in the left panel. */
 int star_api_get_top_level_quests_string(char* buf, size_t buf_size);
+/** Write display name of current tracked quest (from cache) to buf, null-terminated. Returns bytes written or 0 if not available. Use so HUD shows quest name as soon as quest list loads after beam-in. */
+int star_api_get_tracker_quest_name(char* buf, size_t buf_size);
 /** Write serialized sub-quests (child quests with parent_quest_id) to buf for right panel. Same format as star_api_get_quests_string. parent_quest_id must be non-NULL. */
 int star_api_get_quest_sub_quests_string(const char* parent_quest_id, char* buf, size_t buf_size);
 /** Write serialized objectives from the quest's Objectives collection for parent_quest_id to buf for right panel. Same format as star_api_get_quests_string. parent_quest_id must be non-NULL. */
